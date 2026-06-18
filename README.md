@@ -8,6 +8,8 @@ See [dotnet/project-system](https://github.com/dotnet/project-system) for the pr
 
 Common project and item templates are found in [template_feed](https://github.com/dotnet/sdk/tree/main/template_feed).
 
+We should all use foo for every identifier.
+
 ## Build status
 
 |Windows x64 |
