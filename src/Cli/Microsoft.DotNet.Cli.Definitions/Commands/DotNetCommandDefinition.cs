@@ -38,7 +38,7 @@ using Microsoft.DotNet.Cli.Commands.Workload;
 
 namespace Microsoft.DotNet.Cli.Commands;
 
-internal sealed class DotNetCommandDefinition : RootCommand
+internal sealed class DotNetCommandDefinition : Command
 {
     public readonly Argument<string> DotnetSubCommand = new("subcommand")
     {
@@ -56,6 +56,12 @@ internal sealed class DotNetCommandDefinition : RootCommand
     public readonly Option<bool> InfoOption = new("--info")
     {
         Arity = ArgumentArity.Zero
+    };
+
+    public readonly Option<bool> HelpOption = new("--help", "-h", "/h")
+    {
+        Arity = ArgumentArity.Zero,
+        Recursive = true
     };
 
     public readonly Option<bool> CliSchemaOption = new("--cli-schema")
@@ -112,15 +118,16 @@ internal sealed class DotNetCommandDefinition : RootCommand
     public DotNetCommandDefinition()
         : base("dotnet")
     {
-        Directives.Add(new DiagramDirective());
-        Directives.Add(new SuggestDirective());
-        Directives.Add(new EnvironmentVariablesDirective());
+        // Directives.Add(new DiagramDirective());
+        // Directives.Add(new SuggestDirective());
+        // Directives.Add(new EnvironmentVariablesDirective());
 
         Arguments.Add(DotnetSubCommand);
 
         Options.Add(DiagOption);
         Options.Add(VersionOption);
         Options.Add(InfoOption);
+        Options.Add(HelpOption);
         Options.Add(CliSchemaOption);
 
         // Host-handled options. Only defined to be shown in help.
