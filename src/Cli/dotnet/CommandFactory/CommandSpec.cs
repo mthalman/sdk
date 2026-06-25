@@ -13,6 +13,7 @@ public class CommandSpec(string path, string? args, IDictionary<string, string>?
 
     public IDictionary<string, string> EnvironmentVariables { get; } = environmentVariables ?? new Dictionary<string, string>();
 
+#if !CLI_AOT
     internal void AddEnvironmentVariablesFromProject(IProject project)
     {
         foreach (var environmentVariable in project.EnvironmentVariables)
@@ -20,4 +21,5 @@ public class CommandSpec(string path, string? args, IDictionary<string, string>?
             EnvironmentVariables.Add(environmentVariable.Key, environmentVariable.Value);
         }
     }
+#endif
 }

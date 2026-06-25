@@ -5,8 +5,13 @@
 
 using System.Collections.Specialized;
 using System.Web;
+#if CLI_AOT
+using System.Text.Json;
+using System.Text.Json.Serialization;
+#else
 using NuGet.Protocol;
 using NuGet.Protocol.Core.Types;
+#endif
 
 namespace Microsoft.DotNet.Cli.NugetSearch;
 
@@ -79,6 +84,26 @@ internal class NugetToolSearchApiRequest : INugetToolSearchApiRequest
     }
 
     // More detail on this API https://github.com/dotnet/sdk/issues/12038
+#if CLI_AOT
+    // NuGet.Protocol's service-index resolution isn't AOT-compatible, so under AOT we read the
+    // service index directly over HTTP and select the SearchQueryService endpoint using
+    // System.Text.Json source generation.
+    private static async Task<Uri> DomainAndPath()
+    {
+        using var httpClient = new HttpClient();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var indexJson = await httpClient.GetStringAsync("https://api.nuget.org/v3/index.json", cancellation.Token);
+
+        var index = JsonSerializer.Deserialize(indexJson, NugetServiceIndexJsonSerializerContext.Default.NugetServiceIndex);
+        var resource = index?.Resources?.FirstOrDefault(r => r.Type == "SearchQueryService/3.5.0")
+            ?? throw new NugetSearchApiRequestException(
+                string.Format(
+                    CliStrings.NonRetriableNugetSearchFailure,
+                    "https://api.nuget.org/v3/index.json", "SearchQueryService/3.5.0 not found", "200"));
+
+        return new Uri(resource.Id);
+    }
+#else
     private static async Task<Uri> DomainAndPath()
     {
         var repository = Repository.Factory.GetCoreV3("https://api.nuget.org/v3/index.json");
@@ -86,4 +111,25 @@ internal class NugetToolSearchApiRequest : INugetToolSearchApiRequest
         var uris = resource.GetServiceEntryUris("SearchQueryService/3.5.0");
         return uris[0];
     }
+#endif
 }
+
+#if CLI_AOT
+internal sealed class NugetServiceIndex
+{
+    [JsonPropertyName("resources")]
+    public NugetServiceResource[] Resources { get; set; }
+}
+
+internal sealed class NugetServiceResource
+{
+    [JsonPropertyName("@id")]
+    public string Id { get; set; }
+
+    [JsonPropertyName("@type")]
+    public string Type { get; set; }
+}
+
+[JsonSerializable(typeof(NugetServiceIndex))]
+internal partial class NugetServiceIndexJsonSerializerContext : JsonSerializerContext;
+#endif

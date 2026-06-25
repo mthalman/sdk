@@ -76,6 +76,75 @@
   </ItemGroup>
 
   <!--
+    'dotnet tool' command (AOT-capable subset): the parser plus the real implementations of the
+    local 'tool list'/'tool uninstall', 'tool run', and 'tool search'. The global/tool-path
+    variants and install/update/restore/execute fall back to the managed CLI, so their sources are
+    intentionally NOT linked here.
+  -->
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\Commands\Tool\ToolCommandParser.cs" Link="Commands\Tool\ToolCommandParser.cs" />
+  </ItemGroup>
+
+  <!-- 'dotnet tool' shared infrastructure: manifest discovery/editing and tool-package primitives. -->
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\BundledTargetFramework.cs" Link="BundledTargetFramework.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\Commands\Tool\Common\ToolManifestFinderExtensions.cs" Link="Commands\Tool\Common\ToolManifestFinderExtensions.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolManifest\IToolManifestEditor.cs" Link="ToolManifest\IToolManifestEditor.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolManifest\IToolManifestFinder.cs" Link="ToolManifest\IToolManifestFinder.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolManifest\IToolManifestInspector.cs" Link="ToolManifest\IToolManifestInspector.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolManifest\JsonElementExtension.cs" Link="ToolManifest\JsonElementExtension.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolManifest\ToolManifestCannotBeFoundException.cs" Link="ToolManifest\ToolManifestCannotBeFoundException.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolManifest\ToolManifestEditor.cs" Link="ToolManifest\ToolManifestEditor.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolManifest\ToolManifestException.cs" Link="ToolManifest\ToolManifestException.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolManifest\ToolManifestFinder.cs" Link="ToolManifest\ToolManifestFinder.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolManifest\ToolManifestPackage.cs" Link="ToolManifest\ToolManifestPackage.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolPackage\PackageId.cs" Link="ToolPackage\PackageId.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolPackage\ToolCommand.cs" Link="ToolPackage\ToolCommand.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\PrintableTable.cs" Link="PrintableTable.cs" />
+  </ItemGroup>
+
+  <!-- 'dotnet tool list' (local) and 'dotnet tool uninstall' (local). -->
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\Commands\Tool\List\ToolListLocalCommand.cs" Link="Commands\Tool\List\ToolListLocalCommand.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\Commands\Tool\List\ToolListJsonHelper.cs" Link="Commands\Tool\List\ToolListJsonHelper.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\Commands\Tool\Uninstall\ToolUninstallLocalCommand.cs" Link="Commands\Tool\Uninstall\ToolUninstallLocalCommand.cs" />
+  </ItemGroup>
+
+  <!-- 'dotnet tool run': local tools command resolver chain. -->
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\Commands\Tool\Run\ToolRunCommand.cs" Link="Commands\Tool\Run\ToolRunCommand.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\Commands\Tool\ToolCommandSpecCreator.cs" Link="Commands\Tool\ToolCommandSpecCreator.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\CommandFactory\CommandFactoryUsingResolver.cs" Link="CommandFactory\CommandFactoryUsingResolver.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\CommandFactory\CommandSpec.cs" Link="CommandFactory\CommandSpec.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\CommandFactory\CommandResolution\LocalToolsCommandResolver.cs" Link="CommandFactory\CommandResolution\LocalToolsCommandResolver.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\CommandFactory\CommandResolution\MuxerCommandSpecMaker.cs" Link="CommandFactory\CommandResolution\MuxerCommandSpecMaker.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\CommandFactory\CommandResolution\ActivityContextFactory.cs" Link="CommandFactory\CommandResolution\ActivityContextFactory.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\CommandFactory\CommandResolution\ICommandResolver.cs" Link="CommandFactory\CommandResolution\ICommandResolver.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\CommandFactory\CommandResolution\CommandResolverArguments.cs" Link="CommandFactory\CommandResolution\CommandResolverArguments.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolPackage\LocalToolsResolverCache.cs" Link="ToolPackage\LocalToolsResolverCache.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolPackage\ResolverCacheInconsistentException.cs" Link="ToolPackage\ResolverCacheInconsistentException.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolPackage\ILocalToolsResolverCache.cs" Link="ToolPackage\ILocalToolsResolverCache.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\ToolPackage\RestoredCommandIdentifier.cs" Link="ToolPackage\RestoredCommandIdentifier.cs" />
+  </ItemGroup>
+
+  <!-- 'dotnet tool search': NuGet.org search via HTTP + STJ (NuGet.Protocol swapped under CLI_AOT). -->
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\Commands\Tool\Search\ToolSearchCommand.cs" Link="Commands\Tool\Search\ToolSearchCommand.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\Commands\Tool\Search\SearchResultPrinter.cs" Link="Commands\Tool\Search\SearchResultPrinter.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\Commands\Tool\Search\NugetSearchSerializables.cs" Link="Commands\Tool\Search\NugetSearchSerializables.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\NugetSearch\AuthorsConverter.cs" Link="NugetSearch\AuthorsConverter.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\NugetSearch\INugetToolSearchApiRequest.cs" Link="NugetSearch\INugetToolSearchApiRequest.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\NugetSearch\NugetSearchApiParameter.cs" Link="NugetSearch\NugetSearchApiParameter.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\NugetSearch\NugetSearchApiRequestException.cs" Link="NugetSearch\NugetSearchApiRequestException.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\NugetSearch\NugetSearchApiResultDeserializer.cs" Link="NugetSearch\NugetSearchApiResultDeserializer.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\NugetSearch\NugetToolSearchApiRequest.cs" Link="NugetSearch\NugetToolSearchApiRequest.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\NugetSearch\NugetSearchApiSerializable\NugetSearchApiAuthorsSerializable.cs" Link="NugetSearch\NugetSearchApiSerializable\NugetSearchApiAuthorsSerializable.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\NugetSearch\NugetSearchApiSerializable\NugetSearchApiContainerSerializable.cs" Link="NugetSearch\NugetSearchApiSerializable\NugetSearchApiContainerSerializable.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\NugetSearch\NugetSearchApiSerializable\NugetSearchApiPackageSerializable.cs" Link="NugetSearch\NugetSearchApiSerializable\NugetSearchApiPackageSerializable.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\dotnet\NugetSearch\NugetSearchApiSerializable\NugetSearchApiVersionSerializable.cs" Link="NugetSearch\NugetSearchApiSerializable\NugetSearchApiVersionSerializable.cs" />
+  </ItemGroup>
+
+  <!--
     Forwarding-app help support: the shared DotnetHelpBuilder renders help for the external-tool
     commands (msbuild/nuget/vstest/format/fsi) by shelling out to the underlying tool. These sources
     use AOT-friendly (out-of-process) codepaths under #if CLI_AOT so the help writer needs no

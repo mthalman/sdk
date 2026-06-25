@@ -4,16 +4,21 @@
 #nullable disable
 
 using System.Diagnostics;
-using Microsoft.DotNet.Cli.CommandFactory.CommandResolution;
 using Microsoft.DotNet.Cli.Utils;
+#if !CLI_AOT
+using Microsoft.DotNet.Cli.CommandFactory.CommandResolution;
 using NuGet.Frameworks;
+#endif
 
 namespace Microsoft.DotNet.Cli.CommandFactory;
 
 public static class CommandFactoryUsingResolver
 {
+#if !CLI_AOT
     private static readonly string[] _knownCommandsAvailableAsDotNetTool = ["dotnet-dev-certs", "dotnet-sql-cache", "dotnet-user-secrets", "dotnet-watch", "dotnet-user-jwts"];
+#endif
 
+#if !CLI_AOT
     public static Command CreateDotNet(
         string commandName,
         IEnumerable<string> args,
@@ -97,6 +102,7 @@ public static class CommandFactoryUsingResolver
         return command;
     }
 #nullable disable
+#endif
 
     public static Command Create(CommandSpec commandSpec)
     {
