@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/stale-reference-check/**'
       - '.github/workflows/stale-reference-*'
+      - '.github/workflows/aw.json'
   workflow_dispatch:
 
 permissions:
@@ -24,3 +25,6 @@ jobs:
         with:
           node-version: '24'
       - run: node --test .github/stale-reference-check/test/*.test.mjs
+      - name: Verify native MCP protocol compatibility
+        timeout-minutes: 5
+        run: node .github/stale-reference-check/test/gateway-smoke.mjs

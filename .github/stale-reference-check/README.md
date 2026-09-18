@@ -78,6 +78,17 @@ file editing are disabled; it has no source checkout, general-purpose Node
 execution, or GitHub tools. Native tool schemas define the input arguments,
 including the single JSON-string `payload` for `record_interpretations`, so the
 agent never needs temporary files or shell pipelines to submit its results.
+The gh-aw v0.88.7 compiler's default MCP gateway v0.4.18 cannot negotiate native
+clients' stateless discovery correctly. The supported
+[`aw.json` container mapping](../workflows/aw.json) replaces that exact image with
+digest-pinned v0.4.24, which includes the
+[upstream protocol fallback fix](https://github.com/github/gh-aw-mcpg/pull/13221).
+Strict mode, sandboxing, and permissions remain unchanged. This is a
+[repository-wide compiler mapping](https://github.com/github/gh-aw/blob/v0.88.7/pkg/workflow/compiler_repo_config.go):
+it affects future compilations that reference v0.4.18, not existing lock files
+or other gateway versions. Remove it when upgrading the compiler to a compatible
+default, and rerun the protocol smoke check.
+
 The interpreter pins `gpt-5.6-luna` and permits at most 64 agent turns and
 150 AI credits, retaining the 20-minute agent-execution timeout. The generated
 job has a separate 60-minute ceiling for setup, execution, and post-processing.
@@ -230,6 +241,22 @@ node --test .github\stale-reference-check\test\*.test.mjs
 The [helper test workflow](../workflows/stale-reference-check-tests.yml) runs
 these tests on relevant pull requests without invoking the interpreter or
 granting issue-write permissions.
+It also runs an independent Docker-backed
+[`gateway-smoke.mjs`](test/gateway-smoke.mjs) protocol check against the pinned
+image. With Docker running (Linux containers), run it locally using:
+
+```powershell
+node .github\stale-reference-check\test\gateway-smoke.mjs
+```
+
+This check downloads the public pinned gateway image if needed, uses an
+authenticated synthetic MCP fixture, and verifies stateless-probe rejection,
+legacy session initialization, tool discovery, and source/output-shaped tool
+calls. It uses no Copilot PAT, GitHub API, or model inference and removes its
+uniquely named container on completion. An optional digest-pinned gateway image
+argument allows checking a previous version against the same assertions.
+The fast fixture tests remain independent of Docker. The protocol check does not
+replace an end-to-end hosted preview of the interpreter.
 
 Edit the interpreter Markdown, never its generated lock file. The checked-in
 workflow is compiled with gh-aw v0.88.7 and its matching immutable runtime:
