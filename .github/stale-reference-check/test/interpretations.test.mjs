@@ -76,6 +76,16 @@ test('accepts XML workaround conditions and historical irrelevant classification
     assert.equal((await validate(f, [result(candidate)]))[0].status, 'irrelevant');
 });
 
+test('rejects supporting code links even alongside a valid issue blocker', async t => {
+    const codeUrl = 'https://github.com/dotnet/msbuild/blob/main/src/Build/Construction/Solution/SolutionProjectGenerator.cs#L659-L672';
+    const f = await fixture(t, `// TODO replace duplicated logic when the API is public: ${url}\n// Current implementation: ${codeUrl}\n`);
+    const candidate = f.manifest.candidates[0];
+    await assert.rejects(validate(f, [result(candidate, [action(candidate, { urls: [url, codeUrl] })])]),
+        /Action URL must identify a public GitHub issue or pull request/);
+    const validated = await validate(f, [result(candidate, [action(candidate)])]);
+    assert.deepEqual(validated[0].actions[0].urls, [url]);
+});
+
 test('requires bounded supplied namespace context for nested parameterized test names', async t => {
     const lines = [
         'namespace Sample.Tests;',

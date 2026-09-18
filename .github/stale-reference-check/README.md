@@ -130,6 +130,11 @@ preview runs do not.
 Supported references are public GitHub issue and pull-request URLs, including
 cross-repository blockers. Fragments and query strings do not produce duplicate
 lookups. References through `/issues/` that identify a PR are checked as PRs.
+Code links (`/blob/`, `/tree/`), commits, repository homepages, and documentation
+may explain a workaround but cannot be submitted as blockers, even alongside a
+valid issue/PR. The interpreter prompt requires a final URL-shape check before
+submission; deterministic validation still rejects the entire batch if any
+unsupported URL slips through.
 
 An issue qualifies only when closed **as completed**. A PR qualifies only when
 **merged**. All identified blockers for an action must qualify. Open/reopened

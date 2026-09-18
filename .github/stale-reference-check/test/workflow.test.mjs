@@ -373,6 +373,10 @@ test("agent transport uses native bounded text tools rather than shell serializa
     assert.match(header, /return formatContext\(await requestSourceTools/);
     assert.match(workflow, /Do not pass `schemaVersion` or `results` as top-level tool arguments/);
     assert.match(workflow, /Do not restate the analysis or calculate/);
+    assert.match(workflow, /https:\/\/github\.com\/OWNER\/REPO\/issues\/NUMBER/);
+    assert.match(workflow, /https:\/\/github\.com\/OWNER\/REPO\/pull\/NUMBER/);
+    assert.match(workflow, /Source-code links \(`\/blob\/`, `\/tree\/`\)/);
+    assert.match(workflow, /A single unsupported URL rejects the entire batch/);
     const generated = await readFile(path.join(workflowDirectory, "stale-reference-interpret.lock.yml"), "utf8");
     const execution = generated.match(/      - name: Execute GitHub Copilot CLI\r?\n([\s\S]*?)(?=^      - )/m)?.[1] ?? "";
     assert.ok(execution.includes("--allow-tool mcpscripts --allow-tool safeoutputs"), "Native MCP tools must be allowed.");
