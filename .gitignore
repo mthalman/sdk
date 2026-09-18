@@ -64,3 +64,6 @@ eng/dotnetup/
 # GitHub Copilot CLI user-local settings
 # See https://docs.github.com/copilot/reference/copilot-cli-reference/cli-config-dir-reference#configuration-file-settings
 .github/copilot/settings.local.json
+
+# Stale-reference workflow local inputs, cache, and previews
+/.stale-reference-check/
