@@ -121,6 +121,24 @@ test('keeps separate windows, exact twenty-line context, Unicode paths and whole
     assert.notEqual(before.candidates[0].blobSha, after.candidates[0].blobSha);
 });
 
+test('excludes its own synthetic test cases without excluding real automation source', async t => {
+    const root = await fixture(t, {
+        '.github/stale-reference-check/test/collect.test.mjs': [
+            'const input = [',
+            '\'[Ignore("https://github.com/dotnet/sdk/issues/123")]\',',
+            '\'// TODO remove once https://github.com/dotnet/sdk/issues/123 is fixed\',',
+            '];',
+        ].join('\n'),
+        '.github/stale-reference-check/test/finalize.test.mjs':
+            '// Workaround fixture https://github.com/dotnet/sdk/issues/123\n',
+        '.github/stale-reference-check/maintenance.mjs':
+            '// TODO real automation https://github.com/dotnet/sdk/issues/456\n',
+    });
+    const result = await collect(root, { rulesHash: 'rules' });
+    assert.deepEqual(result.candidates.map(candidate => candidate.path),
+        ['.github/stale-reference-check/maintenance.mjs']);
+});
+
 test('excludes files without issue/PR URLs but retains seeds with references beyond their window', async t => {
     const root = await fixture(t, {
         'src/NoUrl.cs': '// TODO remove this later\n// Workaround for an old failure\n',
