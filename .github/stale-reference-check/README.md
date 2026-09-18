@@ -25,10 +25,16 @@ opens a pull request, comments on an existing issue, or removes an Ignore.
 
 The compiler's standard threat-detection stage remains enabled. It checks agent
 output rather than performing a second semantic investigation of references.
+It retains the runtime's `detection` model alias rather than inheriting the
+interpreter's pinned model.
 Recording requires successful detection and source validation. The compiler's
 conclusion job is disabled because this compiler version can otherwise create
 diagnostic issues outside the filing limit and preview guard. Native job results,
 logs, and the deterministic decision report provide diagnostics instead.
+The generic safe-output processor is skipped only when the agent succeeds,
+detection approves the output, and `record_interpretations` is the sole output
+type. Missing-tool, missing-data, noop, and mixed-output cases retain the standard
+processor; threat detection and the custom validation job are not bypassed.
 
 ## Scope and bounds
 
@@ -39,23 +45,51 @@ The checker's own synthetic test cases are also excluded from discovery.
 The collector is deliberately not a general-purpose parser of every language.
 
 Files without any GitHub issue/PR URL are eliminated before interpretation.
-Initial context is 20 lines on either side of a hit. Overlapping windows share
-context without merging unrelated actions. Each batch contains at most 25 windows
-and 64 KiB of initial context. The interpreter may request up to two additional
-windows of at most 80 lines per candidate. Cases that cannot be identified
-confidently within those bounds are explicitly deferred, not guessed.
+Initial context is 20 lines on either side of a hit. Overlapping ranges are
+expanded to include adjacent hits, but each candidate retains its own complete
+context; there is no shared-context representation. Each batch contains at most
+25 windows and 64 KiB of initial context, including repeated context.
+
+The reader presents that batch as consecutive, labeled text pages rather than
+one large batch object. Every text response is at most 12 KiB including the
+[pinned MCP adapter's JSON string encoding](https://github.com/github/gh-aw/blob/v0.88.7/actions/setup/js/mcp_handler_process.cjs#L143-L160),
+with an explicit next-page number. The adapter can expose escaped newlines even
+for string results; native calls and bounded pages eliminate the need for shell
+extraction, not the runtime's JSON encoding.
+Read all pages: a candidate, or an unusually long source line, can span pages.
+Paging does not remove candidates, truncate source, or change the batch artifacts.
+Declaration lookup hints give line numbers for nearby syntactic matches, not
+proof of ownership or additional source evidence. Use them to target a necessary
+context expansion, not to guess a fully qualified name. Non-Ignore anchors do not
+require a fully qualified namespace when a stable declaration is already visible.
+
+The interpreter may request up to two additional windows of at most 80 lines
+and 10 KiB of source per candidate. A response also reports the remaining
+expansion allowance. Cases that cannot be identified confidently within those
+bounds are explicitly deferred, not guessed.
 
 Historical references and retained compatibility behavior are not cleanup tasks.
 Distinct nearby comments can depend on different URLs. A class-level Ignore
 requires complete identification of the affected tests; ambiguous coverage is
 deferred. Data rows do not create separate tracking issues.
 
-The interpreter has no source checkout, general-purpose Node execution, file
-editing, or GitHub tools. The bounded reader in
+The interpreter uses native MCP calls, not shell-based CLI proxies. Bash and
+file editing are disabled; it has no source checkout, general-purpose Node
+execution, or GitHub tools. Native tool schemas define the input arguments,
+including the single JSON-string `payload` for `record_interpretations`, so the
+agent never needs temporary files or shell pipelines to submit its results.
+The interpreter pins `gpt-5.6-luna` and permits at most 64 agent turns and
+150 AI credits, retaining the 20-minute agent-execution timeout. The generated
+job has a separate 60-minute ceiling for setup, execution, and post-processing.
+The credit limit is enforced
+by the runtime API proxy, not a dollar-cost estimate. These are initial operational
+guardrails, not measured performance targets; a hosted run is still needed to
+calibrate them after the transport changes.
+The bounded reader in
 [`source-tools.mjs`](source-tools.mjs) runs on the host; its private input artifact
 is outside the agent's filesystem mounts. Only selected batch/context results
-cross that boundary. The host enforces both the two-window limit and an additional
-32 KiB limit per expanded window. Because the pinned
+cross that boundary. The host enforces the expansion and response-size limits.
+Because the pinned
 [gh-aw runtime](https://github.com/github/gh-aw/blob/v0.88.7/actions/setup/js/mcp_server_core.cjs)
 launches a fresh process per MCP script call, a private loopback reader retains the shared
 budget. Tool calls only read source; a trusted post-agent step exports the served
@@ -147,7 +181,25 @@ Manually dispatch **Check potentially stale references** from `main`:
 - Scheduled runs are live and retain validated interpretations.
 
 The run's `stale-reference-report-*` artifact records created/proposed/skipped
-decisions, deferred context, and remaining interpretations. A failure is explicit,
+decisions, deferred context, remaining interpretations, and per-batch counts
+computed from source-validated results. The recording job also writes
+`summary.json` and `runtime.json` beside `interpretations.json`; the agent's
+narrative is not a source of counts.
+An always-run agent post-step also publishes `runtime.json` in
+`stale-reference-runtime-<input-artifact-id>` and the agent job summary, so runtime
+failures do not depend on successful output recording for diagnostics. The
+recording job recomputes metrics from the complete downloaded agent artifact.
+
+[`diagnostics.mjs`](diagnostics.mjs) summarizes the downloaded agent traces:
+request count, models, summed request duration, token/cache usage, AI credits,
+permission-denial occurrences, context-budget failures, and rejected submissions.
+Runtime warnings appear in the decision report and job summaries. Missing,
+malformed, or oversized traces produce explicit unavailable metrics, not zeroes.
+Model prompt-cache tokens are unrelated to the persistent interpretation cache.
+These metrics are observational and never authorize filing; cached-only runs do
+not reuse a previous batch's runtime diagnostics.
+
+A failure is explicit,
 not a successful empty result. API failures do not establish that a blocker was
 resolved. Failed/cancelled interpretation jobs cannot authorize the filing job.
 Artifact consumers use the successful collection job's artifact ID, rather than
@@ -159,6 +211,7 @@ For local, deterministic source collection without GitHub access or inference:
 ```powershell
 node .github\stale-reference-check\cli.mjs collect
 node .github\stale-reference-check\cli.mjs read-batch
+node .github\stale-reference-check\cli.mjs read-batch 2
 ```
 
 Temporary input, cache, and report files live in the git-ignored

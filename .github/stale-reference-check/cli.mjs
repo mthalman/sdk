@@ -13,11 +13,11 @@ switch (command)
         await prepare({ repoRoot, refreshCache: process.env.REFRESH_CACHE === "true" });
         break;
     case "read-batch":
-        if (args.length !== 0)
+        if (args.length > 1 || (args.length === 1 && !/^[1-9]\d*$/.test(args[0])))
         {
-            throw new Error("read-batch takes no arguments.");
+            throw new Error("Usage: read-batch [PAGE]");
         }
-        await printBatch(repoRoot);
+        await printBatch(repoRoot, args.length ? Number(args[0]) : 1);
         break;
     case "context":
         if (args.length !== 3 || !/^\d+$/.test(args[1]) || !/^\d+$/.test(args[2]))
