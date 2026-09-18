@@ -435,6 +435,24 @@ test("agent transport uses native bounded text tools rather than shell serializa
     assert.ok(execution.includes("--allow-tool mcpscripts --allow-tool safeoutputs"), "Native MCP tools must be allowed.");
     assert.doesNotMatch(execution, /--allow-tool.*shell\(|--allow-all-tools/);
     assert.doesNotMatch(generated, /GH_AW_MCP_CLI_SERVERS|mcp_cli_tools_with_safeoutputs_prompt/);
+    assert.doesNotMatch(header, /^strict: false$/m);
+    const pins = JSON.parse(await readFile(path.join(workflowDirectory, "aw.json"), "utf8"));
+    const gateway = pins.container_pins["ghcr.io/github/gh-aw-mcpg:v0.4.18"];
+    assert.equal(gateway.image, "ghcr.io/github/gh-aw-mcpg:v0.4.24");
+    assert.match(gateway.digest, /^sha256:[a-f0-9]{64}$/);
+    const pinnedImage = `${gateway.image}@${gateway.digest}`;
+    assert.ok(generated.includes(pinnedImage), "The compatible gateway image must be immutable.");
+    const startGateway = generated.match(/      - name: Start MCP Gateway\r?\n([\s\S]*?)(?=^      - )/m)?.[1] ?? "";
+    assert.ok(startGateway.includes(pinnedImage), "The executed gateway, not just its pre-pull, must use the fixed image.");
+});
+
+test("helper CI verifies native gateway compatibility when container pins change", async () =>
+{
+    const workflow = await readFile(path.join(workflowDirectory, "stale-reference-check-tests.yml"), "utf8");
+    assert.match(workflow, /workflow_dispatch:/);
+    assert.doesNotMatch(workflow, /pull_request:|schedule:|cron:/);
+    assert.match(workflow, /run: node \.github\/stale-reference-check\/test\/gateway-smoke\.mjs/);
+    assert.doesNotMatch(workflow, /COPILOT_PAT|issues: write/);
 });
 
 test("all entry points retain telemetry and immutable action pins", async () =>
