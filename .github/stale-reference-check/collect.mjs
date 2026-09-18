@@ -91,6 +91,7 @@ export async function readSource(repoRoot, candidate) {
 function ownedSource(filePath) {
     return (sourceExtension.test(filePath) || /(^|\/)(Dockerfile(?:\.[^/]+)?|Makefile|CMakeLists\.txt)$/i.test(filePath))
         && !excludedDirectory.test(filePath)
+        && !/^\.github\/stale-reference-check\/test\//i.test(filePath)
         && !/^eng\/common\//i.test(filePath)
         && !/^src\/(projecttemplates|itemtemplates|templates)\//i.test(filePath)
         && !/\.(g|g\.i|generated|designer|min|verified|received)\./i.test(filePath)

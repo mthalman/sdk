@@ -57,6 +57,7 @@ logs, and the deterministic decision report provide diagnostics instead.
 Discovery scans repository-owned source, real tests, scripts, and build files.
 Documentation and prompt text, test-input fixtures, snapshots, localization,
 generated files, `eng/common`, and manifest-declared vendored files are excluded.
+The checker's own synthetic test cases are also excluded from discovery.
 The collector is deliberately not a general-purpose parser of every language.
 
 Files without any GitHub issue/PR URL are eliminated before interpretation.
