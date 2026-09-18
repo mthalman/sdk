@@ -10,6 +10,8 @@ import {
     validateInterpretations,
 } from "./interpretations.mjs";
 import { finalize } from "./finalize.mjs";
+import { formatContext, getSourceTools } from "./source-tools.mjs";
+import { collectDiagnostics, formatDiagnostics } from "./diagnostics.mjs";
 
 const inputPath = (repoRoot) => path.resolve(repoRoot, process.env.STALE_REFERENCE_INPUT ?? ".stale-reference-check/input");
 const statePath = (repoRoot) => path.join(repoRoot, ".stale-reference-check/state/cache.json");
@@ -95,8 +97,10 @@ export async function prepare({ repoRoot, refreshCache = false, logger = console
         }
     }
     await writeJson(path.join(directory, "source-context.json"), sourceFiles);
-    await copyFile(path.join(repoRoot, ".github/stale-reference-check/source-tools.mjs"),
-        path.join(directory, "source-tools.mjs"));
+    for (const file of ["source-tools.mjs", "diagnostics.mjs"])
+    {
+        await copyFile(path.join(repoRoot, ".github/stale-reference-check", file), path.join(directory, file));
+    }
     const misses = selected.batch.candidates.length;
     if (process.env.GITHUB_OUTPUT)
     {
@@ -132,10 +136,11 @@ async function loadInput(repoRoot)
     return { manifest, batch, cache, cursor };
 }
 
-export async function printBatch(repoRoot)
+export async function printBatch(repoRoot, page = 1)
 {
-    const { batch } = await loadInput(repoRoot);
-    process.stdout.write(`${JSON.stringify(batch, null, 2)}\n`);
+    await loadInput(repoRoot);
+    const tools = await getSourceTools(inputPath(repoRoot));
+    process.stdout.write(tools.readBatch({ page }));
 }
 
 export async function expandContext(repoRoot, { candidateId, startLine, endLine })
@@ -152,13 +157,18 @@ export async function expandContext(repoRoot, { candidateId, startLine, endLine 
         throw new Error("The two-window context expansion budget for this candidate is exhausted.");
     }
     const context = await readContext(repoRoot, manifest, { candidateId, startLine, endLine });
-    if (Buffer.byteLength(context.context, "utf8") > 32 * 1024)
+    const response = formatContext({
+        ...context,
+        remainingExpansions: 1 - evidence.expansions.filter(window => window.candidateId === candidateId).length,
+    });
+    if (Buffer.byteLength(context.context, "utf8") > 10 * 1024 ||
+        Buffer.byteLength(JSON.stringify(response), "utf8") > 12 * 1024)
     {
-        throw new Error("The context window exceeds 32 KiB; request fewer lines.");
+        throw new Error("The context window exceeds 10 KiB or its response exceeds 12 KiB; request fewer lines.");
     }
     evidence.expansions.push({ candidateId, startLine, endLine });
     await writeJson(evidenceFile, { schemaVersion: 1, windows: evidence.expansions });
-    process.stdout.write(`${typeof context === "string" ? context : JSON.stringify(context, null, 2)}\n`);
+    process.stdout.write(`${response}\n`);
 }
 
 async function readContextEvidence(file)
@@ -179,6 +189,12 @@ export async function record(repoRoot, outputFile)
         throw new Error("GH_AW_AGENT_OUTPUT is required.");
     }
     const { manifest, batch } = await loadInput(repoRoot);
+    const runtime = collectDiagnostics(path.dirname(outputFile));
+    await writeJson(path.join(path.dirname(resultsPath(repoRoot)), "runtime.json"), runtime);
+    if (process.env.GITHUB_STEP_SUMMARY)
+    {
+        await appendFile(process.env.GITHUB_STEP_SUMMARY, formatDiagnostics(runtime));
+    }
     const output = await readJson(outputFile);
     if (!Array.isArray(output.items))
     {
@@ -192,7 +208,7 @@ export async function record(repoRoot, outputFile)
     }
     const payload = JSON.parse(items[0].payload);
     const contextEvidence = await readContextEvidence(path.join(inputPath(repoRoot), "context-evidence.json"));
-    await validateInterpretations(payload, manifest, {
+    const validated = await validateInterpretations(payload, manifest, {
         repoRoot,
         expectedCandidateIds: batch.candidates.map(candidate => candidate.id),
         contextEvidence,
@@ -200,6 +216,24 @@ export async function record(repoRoot, outputFile)
     await writeJson(resultsPath(repoRoot), payload);
     await writeJson(path.join(path.dirname(resultsPath(repoRoot)), "context-evidence.json"),
         { schemaVersion: 1, windows: contextEvidence.expansions });
+    const counts = interpretationCounts(validated);
+    await writeJson(path.join(path.dirname(resultsPath(repoRoot)), "summary.json"), { schemaVersion: 1, ...counts });
+    if (process.env.GITHUB_STEP_SUMMARY)
+    {
+        await appendFile(process.env.GITHUB_STEP_SUMMARY,
+            `## Validated source interpretations\n\n${counts.actionable} actionable; ` +
+            `${counts.irrelevant} irrelevant; ${counts.deferred} deferred.\n\n` +
+            "Counts are computed from the source-validated payload, not the agent's narrative.\n");
+    }
+}
+
+function interpretationCounts(results)
+{
+    return {
+        actionable: results.filter(result => result.status === "actionable").length,
+        irrelevant: results.filter(result => result.status === "irrelevant").length,
+        deferred: results.filter(result => result.status === "insufficient_context").length,
+    };
 }
 
 function interpretationPayload(results)
@@ -251,6 +285,9 @@ export async function finish({ github, repository, repoRoot, dryRun, logger = co
     }
 
     const reportFile = path.join(repoRoot, ".stale-reference-check/report.json");
+    const runtimeText = batch.candidates.length
+        ? await readOptional(path.join(path.dirname(resultsPath(repoRoot)), "runtime.json")) : null;
+    const runtime = runtimeText === null ? null : JSON.parse(runtimeText);
     try
     {
         const report = await finalize({ github, repository, headSha: manifest.headSha, actions, dryRun, logger });
@@ -262,20 +299,33 @@ export async function finish({ github, repository, repoRoot, dryRun, logger = co
                 reason: result.reason,
             })),
             remaining: manifest.candidates.length - cachedResults.length,
+            batch: interpretationCounts(fresh),
         };
+        report.runtime = runtime;
+        if (runtime)
+        {
+            report.diagnostics.push(...runtime.diagnostics.map(diagnostic => ({ type: "agent-runtime", ...diagnostic })));
+        }
+        else if (batch.candidates.length)
+        {
+            report.diagnostics.push({ type: "agent-runtime", message: "Runtime diagnostics are unavailable for this batch." });
+        }
         await writeJson(reportFile, report);
         if (process.env.GITHUB_STEP_SUMMARY)
         {
             await appendFile(process.env.GITHUB_STEP_SUMMARY,
                 `## Potentially stale references\n\nMode: ${dryRun ? "preview (no writes)" : "live"}\n\n` +
                 `Created: ${report.created.length}; proposed: ${report.proposed.length}; skipped: ${report.skipped.length}.\n\n` +
-                `Remaining interpretations: ${report.interpretations.remaining}. See the decision-report artifact for details.\n`);
+                `Validated this batch: ${report.interpretations.batch.actionable} actionable; ` +
+                `${report.interpretations.batch.irrelevant} irrelevant; ${report.interpretations.batch.deferred} deferred.\n\n` +
+                `Remaining interpretations: ${report.interpretations.remaining}. See the decision-report artifact for details.\n` +
+                (runtime ? `\n${formatDiagnostics(runtime)}` : ""));
         }
         return report;
     }
     catch (error)
     {
-        await writeJson(reportFile, { failed: true, error: error.message, dryRun });
+        await writeJson(reportFile, { failed: true, error: error.message, dryRun, runtime });
         throw error;
     }
 }

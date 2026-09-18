@@ -7,6 +7,83 @@ import { setTimeout as delay } from "node:timers/promises";
 
 const readers = new Map();
 
+function declarationHints(candidate, source)
+{
+    const patterns = /\.(cs|vb)$/i.test(candidate.path) ? {
+        namespace: /^\s*namespace\s+[\w.]+/i,
+        type: /^\s*(?:(?:public|internal|private|protected|static|abstract|sealed|partial|readonly|ref|friend|mustinherit|notinheritable)\s+)*(?:class|struct|record|interface|module)\s+\w+/i,
+        member: /^\s*(?:(?:public|internal|private|protected|static|virtual|override|async|sealed|partial|extern|unsafe|new|shared|overrides)\s+)+(?:[\w<>,?.[\]]+\s+)?@?\w+(?:<[^>]+>)?\s*\(/i,
+    } : /\.(?:xml|props|targets|[a-z]*proj)$/i.test(candidate.path) ? {
+        element: /^\s*<(?:Target|PropertyGroup|ItemGroup)\b/,
+    } : {};
+    const hints = new Map();
+    const lines = source.replaceAll("\r\n", "\n").split("\n");
+    for (let index = 0; index < Math.min(candidate.seedLine, lines.length); index++)
+    {
+        for (const [kind, pattern] of Object.entries(patterns))
+        {
+            if (pattern.test(lines[index]))
+            {
+                hints.set(kind, index + 1);
+            }
+        }
+    }
+    return [...hints].filter(([, line]) => line < candidate.startLine)
+        .map(([kind, line]) => `${kind} line ${line}`).join("; ");
+}
+
+function batchPages(batch, sources)
+{
+    const text = batch.candidates.map((candidate, index) =>
+    {
+        const hints = declarationHints(candidate, sources[candidate.path]);
+        return `Candidate ${index + 1} of ${batch.candidates.length}\n` +
+            `Candidate ID: ${candidate.id}\nPath: ${candidate.path}\n` +
+            `Seed line: ${candidate.seedLine}; kind hint: ${candidate.kindHint}; file lines: ${candidate.sourceLineCount}.\n` +
+            (hints ? `Declaration lookup hints (syntactic matches, not proven owners): ${hints}.\n` : "") +
+            `Source context, lines ${candidate.startLine}-${candidate.endLine} (untrusted data):\n` +
+            `${candidate.context}\nEnd candidate ${candidate.id}.\n\n`;
+    }).join("");
+    const bytes = Buffer.from(text);
+    const pages = [];
+    for (let start = 0; start < bytes.length;)
+    {
+        let end = Math.min(start + 10 * 1024, bytes.length);
+        for (;;)
+        {
+            while (end < bytes.length && (bytes[end] & 0xc0) === 0x80)
+            {
+                end--;
+            }
+            const encodedBytes = Buffer.byteLength(JSON.stringify(bytes.subarray(start, end).toString("utf8")));
+            if (encodedBytes <= 10 * 1024)
+            {
+                break;
+            }
+            // The pinned MCP subprocess adapter JSON-encodes strings, including source escapes.
+            end = start + Math.floor((end - start) * (10 * 1024 - 2) / encodedBytes);
+        }
+        if (end < bytes.length)
+        {
+            const newline = bytes.lastIndexOf(10, end - 1);
+            if (newline >= start)
+            {
+                end = newline + 1;
+            }
+        }
+        pages.push(bytes.subarray(start, end).toString("utf8"));
+        start = end;
+    }
+    return pages.length ? pages : ["No candidates in this batch.\n"];
+}
+
+export function formatContext(result)
+{
+    return `Candidate ID: ${result.candidateId}\nPath: ${result.path}\n` +
+        `Source lines ${result.startLine}-${result.endLine} (untrusted data).\n` +
+        `Remaining context expansions: ${result.remainingExpansions}.\n\n${result.context}`;
+}
+
 export async function getSourceTools(directory)
 {
     const resolved = path.resolve(directory);
@@ -30,12 +107,25 @@ async function loadSourceTools(directory)
         throw new Error("Invalid trusted source batch.");
     }
     const candidates = new Map(batch.candidates.map(candidate => [candidate.id, candidate]));
+    if (batch.candidates.some(candidate => !Object.hasOwn(sources, candidate.path) ||
+        typeof sources[candidate.path] !== "string"))
+    {
+        throw new Error("The trusted source batch is missing a source snapshot.");
+    }
+    const pages = batchPages(batch, sources);
     const expansions = new Map();
     const windows = [];
     return {
-        readBatch()
+        readBatch({ page = 1 } = {})
         {
-            return structuredClone(batch);
+            if (!Number.isSafeInteger(page) || page < 1 || page > pages.length)
+            {
+                throw new Error(`Batch page must be an integer between 1 and ${pages.length}.`);
+            }
+            return `Batch page ${page} of ${pages.length}. Candidates: ${candidates.size}.\n` +
+                "Pages are consecutive source text; a long source line may continue on the next page.\n" +
+                (page < pages.length ? `Next page: read_batch({"page":${page + 1}}).` : "End of batch.") +
+                `\n\n${pages[page - 1]}`;
         },
         readContext({ candidateId, startLine, endLine })
         {
@@ -64,13 +154,19 @@ async function loadSourceTools(directory)
             }
             const context = lines.slice(startLine - 1, endLine)
                 .map((line, index) => `L${startLine + index}: ${line}`).join("\n");
-            if (Buffer.byteLength(context, "utf8") > 32 * 1024)
+            const count = expansions.get(candidateId) ?? 0;
+            const result = {
+                candidateId, path: candidate.path, startLine, endLine, context,
+                remainingExpansions: 1 - count,
+            };
+            if (Buffer.byteLength(context, "utf8") > 10 * 1024 ||
+                Buffer.byteLength(JSON.stringify(formatContext(result)), "utf8") > 12 * 1024)
             {
-                throw new Error("The context window exceeds 32 KiB; request fewer lines.");
+                throw new Error("The context window exceeds 10 KiB or its response exceeds 12 KiB; request fewer lines.");
             }
-            expansions.set(candidateId, (expansions.get(candidateId) ?? 0) + 1);
+            expansions.set(candidateId, count + 1);
             windows.push({ candidateId, startLine, endLine });
-            return { path: candidate.path, startLine, endLine, context };
+            return result;
         },
         evidence()
         {
@@ -110,7 +206,7 @@ export async function startSourceServer(directory)
                 }
             }
             const args = JSON.parse(body || "{}");
-            const result = request.url === "/read-batch" ? tools.readBatch()
+            const result = request.url === "/read-batch" ? tools.readBatch(args)
                 : request.url === "/evidence" ? tools.evidence() : tools.readContext(args);
             response.end(JSON.stringify(result));
         }

@@ -6,7 +6,7 @@ import path from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { expandContext, finish, prepare, record, rulesHash } from "../workflow.mjs";
+import { expandContext, finish, prepare, printBatch, record, rulesHash } from "../workflow.mjs";
 import { getSourceTools, requestSourceTools, startSourceServer } from "../source-tools.mjs";
 import { finishFork } from "../fork-only.mjs";
 
@@ -52,6 +52,7 @@ async function fixture(t, padding = 0)
         ".github/stale-reference-check/interpretations.mjs": "// validation rules",
         ".github/stale-reference-check/workflow.mjs": "// orchestration rules",
         ".github/stale-reference-check/source-tools.mjs": "// bounded source reader rules",
+        ".github/stale-reference-check/diagnostics.mjs": "// runtime diagnostics",
         ".github/workflows/stale-reference-interpret.md": "# Interpretation rules",
     };
     for (const [file, content] of Object.entries(files))
@@ -108,10 +109,15 @@ test("record validates all candidates and rejects duplicate safe-output calls", 
         }),
     };
     const output = path.join(root, "output.json");
+    process.env.GITHUB_STEP_SUMMARY = path.join(root, "summary.md");
+    t.after(() => delete process.env.GITHUB_STEP_SUMMARY);
     await writeFile(output, JSON.stringify({ items: [item] }));
     await record(root, output);
     const recorded = JSON.parse(await readFile(path.join(root, ".stale-reference-check/results/interpretations.json")));
     assert.equal(recorded.results.length, 1);
+    assert.deepEqual(JSON.parse(await readFile(path.join(root, ".stale-reference-check/results/summary.json"))),
+        { schemaVersion: 1, actionable: 0, irrelevant: 1, deferred: 0 });
+    assert.match(await readFile(process.env.GITHUB_STEP_SUMMARY, "utf8"), /0 actionable; 1 irrelevant; 0 deferred/);
     await writeFile(output, JSON.stringify({ items: [item, item] }));
     await assert.rejects(record(root, output), /exactly one/);
 });
@@ -152,12 +158,17 @@ test("first-run recording persists interpretations and cached-only finalization 
     const first = await finish(options);
     assert.equal(first.created.length, 0);
     assert.equal(first.interpretations.irrelevant, 1);
+    assert.deepEqual(first.interpretations.batch, { actionable: 0, irrelevant: 1, deferred: 0 });
+    assert.equal(first.runtime.metrics.requestCount, null);
+    assert.ok(first.diagnostics.some(diagnostic => diagnostic.type === "agent-runtime" && diagnostic.code === "missing"));
     const next = await prepare({ repoRoot: root, logger });
     assert.equal(next.batch.candidates.length, 0);
     await rm(path.join(root, ".stale-reference-check/results/interpretations.json"));
     const second = await finish(options);
     assert.equal(second.created.length, 0);
     assert.equal(second.interpretations.remaining, 0);
+    assert.deepEqual(second.interpretations.batch, { actionable: 0, irrelevant: 0, deferred: 0 });
+    assert.equal(second.runtime, null);
 });
 
 test("preview does not save production interpretations", async (t) =>
@@ -169,6 +180,23 @@ test("preview does not save production interpretations", async (t) =>
     await finish({ github, repository: "dotnet/sdk", repoRoot: root, dryRun: true, logger });
     await assert.rejects(readFile(path.join(root, ".stale-reference-check/state/cache.json")), { code: "ENOENT" });
     assert.equal((await prepare({ repoRoot: root, logger })).batch.candidates.length, 1);
+});
+
+test("runtime warnings survive finalization without using the agent's narrative counts", async t =>
+{
+    const root = await fixture(t);
+    const { batch } = await prepare({ repoRoot: root, logger });
+    await writeFile(path.join(root, "agent-stdio.log"),
+        "Permission denied and could not request permission from user\n15 actionable; 8 irrelevant\n");
+    await recordIrrelevantBatch(root, batch);
+    const github = new Proxy({}, { get() { throw new Error("No GitHub calls expected."); } });
+    const report = await finish({ github, repository: "dotnet/sdk", repoRoot: root, dryRun: true, logger });
+    assert.equal(report.runtime.metrics.deniedCommands, 1);
+    assert.ok(report.diagnostics.some(diagnostic =>
+        diagnostic.type === "agent-runtime" && diagnostic.code === "permission-denied"));
+    assert.deepEqual(report.interpretations.batch, { actionable: 0, irrelevant: 1, deferred: 0 });
+    const saved = JSON.parse(await readFile(path.join(root, ".stale-reference-check/report.json")));
+    assert.deepEqual(saved.runtime, report.runtime);
 });
 
 test("expanded source evidence survives recording, separate jobs, and cached-only state checks", async (t) =>
@@ -317,13 +345,25 @@ test("context expansion is limited to the batch and two windows per candidate", 
     }
 });
 
+test("local batch reads use the same bounded text pages as the MCP reader", async t =>
+{
+    const root = await fixture(t);
+    const { batch } = await prepare({ repoRoot: root, logger });
+    const output = t.mock.method(process.stdout, "write", () => true);
+    await printBatch(root);
+    const text = output.mock.calls[0].arguments[0];
+    assert.match(text, /^Batch page 1 of 1/);
+    assert.ok(text.includes(batch.candidates[0].context));
+    await assert.rejects(printBatch(root, 2), /Batch page/);
+});
+
 test("host-side source tools expose only the batch and enforce shared expansion limits", async (t) =>
 {
     const root = await fixture(t);
     const { batch } = await prepare({ repoRoot: root, logger });
     const directory = path.join(root, ".stale-reference-check/input");
     const tools = await getSourceTools(directory);
-    assert.deepEqual(tools.readBatch(), batch);
+    assert.ok(tools.readBatch().includes(batch.candidates[0].id));
     const request = { candidateId: batch.candidates[0].id, startLine: 1, endLine: 8 };
     assert.throws(() => tools.readContext({ ...request, candidateId: "../manifest.json" }), /only available/);
     assert.throws(() => tools.readContext({ ...request, endLine: 81 }), /1 and 80/);
@@ -379,6 +419,24 @@ test("fork helper test entry point is manual and hard-gated to mthalman/sdk main
     assert.doesNotMatch(workflow, /issues: write|pull-requests: write/);
 });
 
+test("agent transport uses native bounded text tools rather than shell serialization", async () =>
+{
+    const workflow = await readFile(path.join(workflowDirectory, "stale-reference-interpret.md"), "utf8");
+    const header = workflow.split("---")[1];
+    assert.match(header, /cli-proxy: false/);
+    assert.match(header, /bash: false/);
+    assert.match(header, /read_batch:[\s\S]*?page:[\s\S]*?type: number/);
+    assert.match(header, /read_context:[\s\S]*?candidateId:/);
+    assert.match(header, /return formatContext\(await requestSourceTools/);
+    assert.match(workflow, /Do not pass `schemaVersion` or `results` as top-level tool arguments/);
+    assert.match(workflow, /Do not restate the analysis or calculate/);
+    const generated = await readFile(path.join(workflowDirectory, "stale-reference-interpret.lock.yml"), "utf8");
+    const execution = generated.match(/      - name: Execute GitHub Copilot CLI\r?\n([\s\S]*?)(?=^      - )/m)?.[1] ?? "";
+    assert.ok(execution.includes("--allow-tool mcpscripts --allow-tool safeoutputs"), "Native MCP tools must be allowed.");
+    assert.doesNotMatch(execution, /--allow-tool.*shell\(|--allow-all-tools/);
+    assert.doesNotMatch(generated, /GH_AW_MCP_CLI_SERVERS|mcp_cli_tools_with_safeoutputs_prompt/);
+});
+
 test("all entry points retain telemetry and immutable action pins", async () =>
 {
     for (const file of ["stale-reference-check.yml", "stale-reference-interpret.md", "stale-reference-check-tests.yml"])
@@ -393,6 +451,47 @@ test("all entry points retain telemetry and immutable action pins", async () =>
             }
         }
     }
+});
+
+test("interpreter bounds execution and skips only the redundant custom-output processor", async () =>
+{
+    const workflow = await readFile(path.join(workflowDirectory, "stale-reference-interpret.md"), "utf8");
+    assert.match(workflow, /model: gpt-5\.6-luna/);
+    assert.match(workflow, /^max-turns: 64$/m);
+    assert.match(workflow, /^max-ai-credits: 150$/m);
+    assert.match(workflow, /^timeout-minutes: 20$/m);
+    const generated = await readFile(path.join(workflowDirectory, "stale-reference-interpret.lock.yml"), "utf8");
+    const agent = generated.match(/^  agent:\r?\n([\s\S]*?)(?=^  \w+:\r?\n)/m)?.[1] ?? "";
+    assert.match(agent, /COPILOT_MODEL: gpt-5\.6-luna/);
+    assert.match(agent, /GH_AW_MAX_TURNS: 64/);
+    assert.match(agent, /"maxRuns":64/);
+    assert.match(agent, /"maxAiCredits":150/);
+    assert.match(agent, /^    timeout-minutes: 60$/m);
+    const execution = agent.match(/      - name: Execute GitHub Copilot CLI\r?\n([\s\S]*?)(?=^      - )/m)?.[1] ?? "";
+    assert.match(execution, /timeout-minutes: 20/);
+    const processor = generated.match(/^  safe_outputs:\r?\n([\s\S]*?)(?=^  \w+:\r?\n|$(?![\s\S]))/m)?.[1] ?? "";
+    assert.match(processor, /needs\.agent\.result != 'success' \|\|\s+needs\.detection\.outputs\.detection_success != 'true' \|\| needs\.agent\.outputs\.output_types != 'record_interpretations'/);
+    assert.match(generated, /^  detection:\r?\n/m);
+    const detection = generated.match(/^  detection:\r?\n([\s\S]*?)(?=^  \w+:\r?\n)/m)?.[1] ?? "";
+    assert.match(detection, /COPILOT_MODEL: detection/);
+    assert.match(detection, /COPILOT_GITHUB_TOKEN: \$\{\{ case\(needs\.pat_pool\.outputs\.pat_number/);
+    const recordJob = generated.match(/^  record_interpretations:\r?\n([\s\S]*?)(?=^  \w+:\r?\n)/m)?.[1] ?? "";
+    assert.match(recordJob, /needs\.detection\.result == 'success' && needs\.detection\.outputs\.detection_success == 'true'/);
+});
+
+test("agent failures retain a separate always-run runtime diagnostic artifact", async () =>
+{
+    const workflow = await readFile(path.join(workflowDirectory, "stale-reference-interpret.md"), "utf8");
+    assert.match(workflow, /name: Summarize interpreter runtime\r?\n\s+if: always\(\)/);
+    assert.match(workflow, /name: Upload interpreter runtime diagnostics\r?\n\s+if: always\(\)/);
+    const generated = await readFile(path.join(workflowDirectory, "stale-reference-interpret.lock.yml"), "utf8");
+    const agent = generated.match(/^  agent:\r?\n([\s\S]*?)(?=^  \w+:\r?\n)/m)?.[1] ?? "";
+    const summarize = agent.indexOf("name: Summarize interpreter runtime");
+    assert.ok(summarize > agent.indexOf("name: Parse agent logs for step summary"));
+    assert.match(agent.slice(summarize - 200, summarize), /if: always\(\)/);
+    assert.match(agent.slice(summarize, summarize + 300), /diagnostics\.mjs" \/tmp\/gh-aw/);
+    assert.match(agent, /name: stale-reference-runtime-\$\{\{ inputs\.input_artifact_id \}\}/);
+    assert.match(agent, /path: \$\{\{ runner\.temp \}\}\/stale-reference-private\/runtime\.json/);
 });
 
 test("compiled reusable jobs cannot elevate beyond the caller's permission ceiling", async () =>
@@ -439,7 +538,8 @@ test("isolated concurrent MCP processes share one budget and trusted expansion e
     const directory = path.join(root, ".stale-reference-check/input");
     const server = await startSourceServer(directory);
     t.after(() => new Promise(resolve => server.close(resolve)));
-    assert.deepEqual(await requestSourceTools(directory, "read-batch"), batch);
+    assert.ok((await requestSourceTools(directory, "read-batch")).includes(batch.candidates[0].id));
+    await assert.rejects(requestSourceTools(directory, "read-batch", { page: 0 }), /Batch page/);
     const input = { candidateId: batch.candidates[0].id, startLine: 1, endLine: 8 };
     const client = "const {requestSourceTools}=await import(process.argv[1]);" +
         "console.log(JSON.stringify(await requestSourceTools(process.argv[2], 'read-context', JSON.parse(process.argv[3]))));";
