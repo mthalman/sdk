@@ -27,19 +27,21 @@ export function verifySubmission(submission, receipt)
     return submission.payload;
 }
 
-// Expand the receipt in the trusted post-step, before the framework uploads the
-// agent artifact. Threat detection must inspect the full payload, not just its hash.
+// Add the frozen submission in the trusted post-step before the framework uploads
+// the agent artifact. Threat detection must inspect the full payload, not just its hash.
 export async function completeSubmission(directory, outputFile)
 {
     const submission = await requestSourceTools(directory, "submission");
     const output = JSON.parse(await readFile(outputFile, "utf8"));
-    const items = Array.isArray(output?.items) ? output.items.filter(item => item?.type === "record_interpretations") : null;
-    if (!Array.isArray(items) || items.length !== 1 ||
-        Object.keys(items[0]).some(key => key !== "type" && key !== "receipt"))
+    if (output === null || typeof output !== "object" || Array.isArray(output) ||
+        Object.hasOwn(output, "staleReferenceSubmission"))
     {
-        throw new Error("Expected exactly one unexpanded record_interpretations receipt.");
+        throw new Error("Expected agent output without a trusted stale-reference submission.");
     }
-    items[0].payload = verifySubmission(submission, items[0].receipt);
+    output.staleReferenceSubmission = {
+        receipt: submission.receipt,
+        payload: verifySubmission(submission, submission.receipt),
+    };
     await writeFile(path.join(directory, "submission.json"), `${JSON.stringify(submission)}\n`);
     await writeFile(outputFile, `${JSON.stringify(output)}\n`);
 }

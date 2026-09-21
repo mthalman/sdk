@@ -8,14 +8,13 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 
-const pins = JSON.parse(await readFile(new URL("../../workflows/aw.json", import.meta.url), "utf8"));
-const pin = pins.container_pins["ghcr.io/github/gh-aw-mcpg:v0.4.18"];
-const image = process.argv[2] ?? `${pin.image}@${pin.digest}`;
+const lock = await readFile(new URL("../../workflows/stale-reference-interpret.lock.yml", import.meta.url), "utf8");
+const image = process.argv[2] ?? lock.match(/ghcr\.io\/github\/gh-aw-mcpg:v0\.4\.25@sha256:[a-f0-9]{64}/)?.[0];
 assert.match(image, /^ghcr\.io\/github\/gh-aw-mcpg:v[\d.]+@sha256:[a-f0-9]{64}$/);
 
 const tools = [
     { name: "read_batch", description: "Read synthetic source.", inputSchema: { type: "object" } },
-    { name: "record_interpretations", description: "Record synthetic output.", inputSchema: { type: "object" } },
+    { name: "prepare_interpretations", description: "Prepare synthetic output.", inputSchema: { type: "object" } },
 ];
 const token = randomUUID();
 const backend = createServer(async (request, response) =>

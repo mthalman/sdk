@@ -196,19 +196,18 @@ export async function record(repoRoot, outputFile)
         await appendFile(process.env.GITHUB_STEP_SUMMARY, formatDiagnostics(runtime));
     }
     const output = await readJson(outputFile);
-    if (!Array.isArray(output.items))
+    const detectedSubmission = output?.staleReferenceSubmission;
+    if (detectedSubmission === null || typeof detectedSubmission !== "object" ||
+        Array.isArray(detectedSubmission) ||
+        Object.keys(detectedSubmission).some(key => key !== "receipt" && key !== "payload") ||
+        typeof detectedSubmission.receipt !== "string" ||
+        !/^[a-f0-9]{64}$/.test(detectedSubmission.receipt))
     {
-        throw new Error("Safe output does not contain an items array.");
-    }
-    const items = output.items.filter(item => item.type === "record_interpretations");
-    if (items.length !== 1 || typeof items[0].receipt !== "string" || !/^[a-f0-9]{64}$/.test(items[0].receipt) ||
-        Object.keys(items[0]).some(key => !["type", "receipt", "payload"].includes(key)))
-    {
-        throw new Error("Expected exactly one record_interpretations receipt.");
+        throw new Error("Expected one trusted stale-reference submission in the agent output.");
     }
     const submission = await readJson(path.join(inputPath(repoRoot), "submission.json"));
-    const payload = verifySubmission(submission, items[0].receipt);
-    if (!items[0].payload || submissionReceipt(items[0].payload) !== items[0].receipt)
+    const payload = verifySubmission(submission, detectedSubmission.receipt);
+    if (!detectedSubmission.payload || submissionReceipt(detectedSubmission.payload) !== detectedSubmission.receipt)
     {
         throw new Error("The payload inspected by threat detection does not match the validated submission.");
     }

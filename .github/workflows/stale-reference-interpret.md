@@ -32,11 +32,6 @@ jobs:
     permissions:
       actions: read
       issues: none
-  safe_outputs:
-    if: >-
-      needs.agent.result != 'success' ||
-      needs.detection.outputs.detection_success != 'true' ||
-      needs.agent.outputs.output_types != 'record_interpretations'
   runtime_diagnostics:
     needs: [activation, agent, detection]
     if: always() && !cancelled() && needs.activation.result == 'success'
@@ -77,6 +72,51 @@ jobs:
         with:
           name: stale-reference-workflow-runtime-${{ inputs.input_artifact_id }}
           path: ${{ runner.temp }}/stale-reference-runtime/workflow-runtime.json
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 7
+  # Workaround for https://github.com/github/gh-aw/issues/62458: keep this
+  # source-specific recorder outside safe-outputs.jobs so v0.89.17 can compile.
+  record_interpretations:
+    needs: [activation, agent, detection]
+    if: >-
+      needs.agent.result == 'success' &&
+      needs.detection.result == 'success' &&
+      needs.detection.outputs.detection_success == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.input_artifact_id }}
+          merge-multiple: true
+          path: .stale-reference-check/input
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stale-reference-context-${{ inputs.input_artifact_id }}
+          path: .stale-reference-check/input
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.activation.outputs.artifact_prefix }}agent
+          path: .stale-reference-check/agent
+      - name: Validate detected interpretations against trusted source
+        env:
+          GH_AW_AGENT_OUTPUT: .stale-reference-check/agent/agent_output.json
+          STALE_REFERENCE_INPUT: .stale-reference-check/input
+        run: node .github/stale-reference-check/cli.mjs record
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stale-reference-interpretations-${{ inputs.input_artifact_id }}
+          path: .stale-reference-check/results
           overwrite: true
           if-no-files-found: error
           retention-days: 7
@@ -189,7 +229,7 @@ mcp-scripts:
       const { formatContext, requestSourceTools } = await import(pathToFileURL(join(directory, "source-tools.mjs")).href);
       return formatContext(await requestSourceTools(directory, "read-context", { candidateId, startLine, endLine }));
   prepare_interpretations:
-    description: Validate the complete batch now against trusted source. Pass payload as a JSON object, not a string, at most 512 KiB when serialized. Invalid submissions return an error you can correct; at most three attempts. Success freezes the payload and returns its receipt for record_interpretations.
+    description: Validate the complete batch now against trusted source. Pass payload as a JSON object, not a string, at most 512 KiB when serialized. Invalid submissions return an error you can correct; at most three attempts. Success freezes the payload for threat detection and trusted recording.
     inputs:
       payload:
         type: object
@@ -218,47 +258,6 @@ safe-outputs:
     create-issue: false
   noop:
     report-as-issue: false
-  jobs:
-    record-interpretations:
-      description: Queue a validated batch for recording after threat detection. First call prepare_interpretations successfully, then pass its receipt unchanged. This call queues recording; the downstream job revalidates source before recording.
-      runs-on: ubuntu-latest
-      if: needs.detection.result == 'success' && needs.detection.outputs.detection_success == 'true'
-      permissions:
-        contents: read
-        actions: read
-      inputs:
-        receipt:
-          description: The exact 64-character receipt returned by prepare_interpretations. Never invent it or send the JSON payload here.
-          required: true
-          type: string
-      steps:
-        - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-          with:
-            ref: ${{ github.sha }}
-            persist-credentials: false
-        - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-          with:
-            node-version: '24'
-        - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-          with:
-            artifact-ids: ${{ inputs.input_artifact_id }}
-            merge-multiple: true
-            path: .stale-reference-check/input
-        - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-          with:
-            name: stale-reference-context-${{ inputs.input_artifact_id }}
-            path: .stale-reference-check/input
-        - name: Validate structured interpretations against trusted source
-          env:
-            STALE_REFERENCE_INPUT: .stale-reference-check/input
-          run: node .github/stale-reference-check/cli.mjs record
-        - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-          with:
-            name: stale-reference-interpretations-${{ inputs.input_artifact_id }}
-            path: .stale-reference-check/results
-            overwrite: true
-            if-no-files-found: error
-            retention-days: 7
 
 timeout-minutes: 20
 max-turns: 64
@@ -407,12 +406,12 @@ irrelevant, record the complete batch rather than returning a bare noop.
 trusted source before accepting it. On rejection, correct the reported problem
 and resubmit the complete batch. There are at most three attempts total; do not
 send parallel submissions. If the budget is exhausted, report `missing_data`
-and stop without calling `record_interpretations`. No partial batch is accepted.
+and stop. No partial batch is accepted.
 
-Success returns a `receipt` and freezes the validated payload. Call
-`record_interpretations` exactly once with `{"receipt":"the returned receipt"}`.
-Do not resend or reconstruct the JSON, replace the accepted payload, or invent
-a receipt. The receipt only queues recording: threat detection and a separate
-committed-source validation must still pass before results can be used.
-After queueing the receipt, stop. Do not restate the analysis or calculate
-counts in a final narrative; trusted code publishes counts after validation.
+Success returns a `receipt` and freezes the validated payload. Do not resend or
+reconstruct the JSON, replace the accepted payload, or invent a receipt. The
+trusted post-step inserts the frozen payload into the agent artifact before
+threat detection; a separate trusted job records it only after detection and
+committed-source validation pass. Stop after a successful submission. Do not
+restate the analysis or calculate counts in a final narrative; trusted code
+publishes counts after validation.

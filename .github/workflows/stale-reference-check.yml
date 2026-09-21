@@ -63,10 +63,12 @@ jobs:
     if: needs.collect.outputs.has_misses == 'true'
     permissions:
       # The compiler declares this for its disabled conclusion job. Executing
-      # interpreter jobs explicitly retain read-only Actions permissions.
+      # interpreter jobs explicitly retain read-only Actions permissions and
+      # cannot elevate to issue writes.
       actions: write
       contents: read
       copilot-requests: write
+      issues: none
     uses: ./.github/workflows/stale-reference-interpret.lock.yml
     with:
       input_artifact_id: ${{ needs.collect.outputs.input_artifact_id }}

@@ -76,7 +76,12 @@ async function stageSubmission(root, payload)
     const accepted = await tools.prepareInterpretations({ payload: JSON.stringify(payload) });
     await writeFile(path.join(directory, "submission.json"), JSON.stringify(tools.submission()));
     await writeFile(path.join(directory, "context-evidence.json"), JSON.stringify(tools.evidence()));
-    return { type: "record_interpretations", ...accepted, payload: tools.submission().payload };
+    return {
+        staleReferenceSubmission: {
+            receipt: accepted.receipt,
+            payload: tools.submission().payload,
+        },
+    };
 }
 
 test("submission validation rejects malformed JSON synchronously and accepts a corrected immutable payload", async t =>
@@ -104,10 +109,10 @@ test("submission validation rejects malformed JSON synchronously and accepts a c
     assert.deepEqual(submission, { schemaVersion: 1, receipt: accepted.receipt, payload: JSON.parse(payload) });
     await writeFile(path.join(directory, "submission.json"), JSON.stringify(submission));
     const output = path.join(root, "output.json");
-    await writeFile(output, JSON.stringify({ items: [{ type: "record_interpretations", ...accepted }] }));
-    await assert.rejects(record(root, output), /payload inspected by threat detection/);
+    await writeFile(output, JSON.stringify({ items: [] }));
+    await assert.rejects(record(root, output), /Expected one trusted stale-reference submission/);
     await completeSubmission(directory, output);
-    assert.deepEqual(JSON.parse(await readFile(output)).items[0].payload, JSON.parse(payload),
+    assert.deepEqual(JSON.parse(await readFile(output)).staleReferenceSubmission.payload, JSON.parse(payload),
         "Threat detection must inspect the actual payload, not merely its receipt.");
     await record(root, output);
     assert.deepEqual(JSON.parse(await readFile(path.join(root,
@@ -197,15 +202,13 @@ test("receipts cannot authorize missing, altered, or unvalidated source results"
         candidateId: candidate.id, status: "irrelevant", reason: "Fixture.", actions: [],
     })) };
     const output = path.join(root, "output.json");
-    await writeFile(output, JSON.stringify({ items: [{ type: "record_interpretations", receipt: "0".repeat(64) }] }));
+    await writeFile(output, JSON.stringify({}));
     await assert.rejects(completeSubmission(directory, output), /No validated submission/);
     const accepted = await tools.prepareInterpretations({ payload: JSON.stringify(payload) });
-    await assert.rejects(completeSubmission(directory, output), /receipt does not match/);
-    await writeFile(output, JSON.stringify({ items: [{ type: "record_interpretations", ...accepted }] }));
     await completeSubmission(directory, output);
     const validOutput = await readFile(output, "utf8");
     const altered = JSON.parse(validOutput);
-    altered.items[0].payload.results[0].reason = "Altered after acceptance.";
+    altered.staleReferenceSubmission.payload.results[0].reason = "Altered after acceptance.";
     await writeFile(output, JSON.stringify(altered));
     await assert.rejects(record(root, output), /payload inspected by threat detection/);
     await writeFile(output, validOutput);
@@ -218,9 +221,9 @@ test("receipts cannot authorize missing, altered, or unvalidated source results"
     // Even a matching receipt cannot replace committed-source validation.
     badSubmission.receipt = submissionReceipt(badSubmission.payload);
     await writeFile(submissionFile, JSON.stringify(badSubmission));
-    await writeFile(output, JSON.stringify({ items: [{
-        type: "record_interpretations", receipt: badSubmission.receipt, payload: badSubmission.payload,
-    }] }));
+    await writeFile(output, JSON.stringify({
+        staleReferenceSubmission: { receipt: badSubmission.receipt, payload: badSubmission.payload },
+    }));
     await assert.rejects(record(root, output), /Unknown, unexpected/);
     await writeFile(submissionFile, validSubmission);
     await writeFile(output, validOutput);
@@ -298,7 +301,7 @@ test("malformed cache is diagnosed and recollected, never treated as interpreted
     assert.match(warnings.join("\n"), /invalid interpretation cache JSON/);
 });
 
-test("record validates all candidates and rejects duplicate safe-output calls", async (t) =>
+test("record validates all candidates from the artifact inspected by threat detection", async (t) =>
 {
     const root = await fixture(t);
     const { batch } = await prepare({ repoRoot: root, logger });
@@ -314,15 +317,17 @@ test("record validates all candidates and rejects duplicate safe-output calls", 
     const output = path.join(root, "output.json");
     process.env.GITHUB_STEP_SUMMARY = path.join(root, "summary.md");
     t.after(() => delete process.env.GITHUB_STEP_SUMMARY);
-    await writeFile(output, JSON.stringify({ items: [item] }));
+    await writeFile(output, JSON.stringify(item));
     await record(root, output);
     const recorded = JSON.parse(await readFile(path.join(root, ".stale-reference-check/results/interpretations.json")));
     assert.equal(recorded.results.length, 1);
     assert.deepEqual(JSON.parse(await readFile(path.join(root, ".stale-reference-check/results/summary.json"))),
         { schemaVersion: 1, actionable: 0, irrelevant: 1, deferred: 0 });
     assert.match(await readFile(process.env.GITHUB_STEP_SUMMARY, "utf8"), /0 actionable; 1 irrelevant; 0 deferred/);
-    await writeFile(output, JSON.stringify({ items: [item, item] }));
-    await assert.rejects(record(root, output), /exactly one/);
+    await writeFile(output, JSON.stringify({
+        staleReferenceSubmission: { ...item.staleReferenceSubmission, unexpected: true },
+    }));
+    await assert.rejects(record(root, output), /Expected one trusted stale-reference submission/);
 });
 
 test("record refuses artifacts prepared with different rules", async (t) =>
@@ -345,9 +350,7 @@ async function recordIrrelevantBatch(root, batch)
         })),
     };
     const output = path.join(root, "output.json");
-    await writeFile(output, JSON.stringify({
-        items: [await stageSubmission(root, payload)],
-    }));
+    await writeFile(output, JSON.stringify(await stageSubmission(root, payload)));
     await record(root, output);
 }
 
@@ -450,7 +453,7 @@ test("expanded source evidence survives recording, separate jobs, and cached-onl
     {
         await new Promise(resolve => server.close(resolve));
     }
-    await writeFile(output, JSON.stringify({ items: [await stageSubmission(root, payload)] }));
+    await writeFile(output, JSON.stringify(await stageSubmission(root, payload)));
     await record(root, output);
     await rm(path.join(directory, "context-evidence.json"));
     let resolved = false;
@@ -560,7 +563,7 @@ test("agent records source interpretations without issue writes or GitHub tools"
     const workflow = await readFile(path.join(workflowDirectory, "stale-reference-interpret.md"), "utf8");
     const header = workflow.split("---")[1];
     assert.match(header, /workflow_call:/);
-    assert.match(header, /record-interpretations:/);
+    assert.match(header, /record_interpretations:/);
     assert.match(header, /needs\.detection\.outputs\.detection_success == 'true'/);
     assert.doesNotMatch(header, /issues: write|pull-requests: write|create-issue: true/);
     assert.doesNotMatch(header, /^\s+github:\s*$/m);
@@ -584,12 +587,10 @@ test("agent transport uses native bounded text tools rather than shell serializa
     assert.match(header, /read_context:[\s\S]*?candidateId:/);
     assert.match(header, /prepare_interpretations:[\s\S]*?payload:[\s\S]*?type: object/);
     assert.match(header, /return requestSourceTools\(directory, "prepare-interpretations", \{ payload: JSON\.stringify\(payload\) \}\)/);
-    const recording = header.slice(header.indexOf("    record-interpretations:"));
-    assert.match(recording, /inputs:\s*\n\s*receipt:/);
-    assert.doesNotMatch(recording, /^\s+payload:/m);
+    assert.doesNotMatch(header, /safe-outputs:[\s\S]*?\n  jobs:/);
     assert.match(header, /return formatContext\(await requestSourceTools/);
     assert.match(workflow, /Do not pass `schemaVersion` or `results` as top-level tool arguments/);
-    assert.match(workflow, /Do not restate the analysis or calculate/);
+    assert.match(workflow, /Stop after a successful submission/);
     assert.match(workflow, /https:\/\/github\.com\/OWNER\/REPO\/issues\/NUMBER/);
     assert.match(workflow, /https:\/\/github\.com\/OWNER\/REPO\/pull\/NUMBER/);
     assert.match(workflow, /Source-code links \(`\/blob\/`, `\/tree\/`\)/);
@@ -601,17 +602,15 @@ test("agent transport uses native bounded text tools rather than shell serializa
     assert.doesNotMatch(execution, /--allow-tool.*shell\(|--allow-all-tools/);
     assert.doesNotMatch(generated, /GH_AW_MCP_CLI_SERVERS|mcp_cli_tools_with_safeoutputs_prompt/);
     assert.doesNotMatch(header, /^strict: false$/m);
-    const pins = JSON.parse(await readFile(path.join(workflowDirectory, "aw.json"), "utf8"));
-    const gateway = pins.container_pins["ghcr.io/github/gh-aw-mcpg:v0.4.18"];
-    assert.equal(gateway.image, "ghcr.io/github/gh-aw-mcpg:v0.4.24");
-    assert.match(gateway.digest, /^sha256:[a-f0-9]{64}$/);
-    const pinnedImage = `${gateway.image}@${gateway.digest}`;
-    assert.ok(generated.includes(pinnedImage), "The compatible gateway image must be immutable.");
+    assert.doesNotMatch(header, /container_pins|safe-outputs:[\s\S]*?\n  jobs:/);
+    const gateway = generated.match(/ghcr\.io\/github\/gh-aw-mcpg:v0\.4\.25@sha256:[a-f0-9]{64}/)?.[0];
+    assert.ok(gateway, "The compiler default gateway image must be immutable.");
     const startGateway = generated.match(/      - name: Start MCP Gateway\r?\n([\s\S]*?)(?=^      - )/m)?.[1] ?? "";
-    assert.ok(startGateway.includes(pinnedImage), "The executed gateway, not just its pre-pull, must use the fixed image.");
+    assert.match(startGateway, /ghcr\.io\/github\/gh-aw-mcpg:v0\.4\.25'/,
+        "The executed gateway must use the compiler default image.");
 });
 
-test("validated payloads reach threat detection before receipts authorize recording", async () =>
+test("validated payloads reach threat detection before the trusted recorder authorizes recording", async () =>
 {
     const workflow = await readFile(path.join(workflowDirectory, "stale-reference-interpret.md"), "utf8");
     assert.match(workflow, /at most three attempts total/);
@@ -620,17 +619,19 @@ test("validated payloads reach threat detection before receipts authorize record
     const generated = await readFile(path.join(workflowDirectory, "stale-reference-interpret.lock.yml"), "utf8");
     const collect = generated.indexOf("id: collect_output");
     const expand = generated.indexOf('complete "$STALE_REFERENCE_PRIVATE" /tmp/gh-aw/agent_output.json');
-    const fallbackUpload = generated.indexOf("name: Upload agent output fallback artifact");
-    assert.ok(collect > 0 && expand > collect && fallbackUpload > expand,
-        "Receipt expansion must follow output collection and precede both detection input artifact uploads.");
+    const artifactUpload = generated.indexOf("name: Upload agent artifacts");
+    assert.ok(collect > 0 && expand > collect && artifactUpload > expand,
+        "Trusted submission expansion must follow output collection and precede the agent artifact upload.");
     const recordJob = generated.match(/^  record_interpretations:\r?\n([\s\S]*?)(?=^  \w+:\r?\n)/m)?.[1] ?? "";
-    assert.match(recordJob, /needs\.detection\.outputs\.detection_success == 'true'/);
+    assert.match(recordJob, /needs\.detection\.result == 'success' && needs\.detection\.outputs\.detection_success == 'true'/);
+    assert.match(recordJob, /name: \$\{\{ needs\.activation\.outputs\.artifact_prefix \}\}agent/);
+    assert.match(recordJob, /GH_AW_AGENT_OUTPUT: \.stale-reference-check\/agent\/agent_output\.json/);
 });
 
-test("helper CI verifies native gateway compatibility when container pins change", async () =>
+test("helper CI verifies native gateway compatibility when the generated workflow changes", async () =>
 {
     const workflow = await readFile(path.join(workflowDirectory, "stale-reference-check-tests.yml"), "utf8");
-    assert.match(workflow, /- '\.github\/workflows\/aw\.json'/);
+    assert.doesNotMatch(workflow, /aw\.json/);
     assert.match(workflow, /run: node \.github\/stale-reference-check\/test\/gateway-smoke\.mjs/);
     assert.doesNotMatch(workflow, /COPILOT_PAT|issues: write/);
 });
@@ -651,7 +652,7 @@ test("all entry points retain telemetry and immutable action pins", async () =>
     }
 });
 
-test("interpreter bounds execution and skips only the redundant custom-output processor", async () =>
+test("interpreter bounds execution and retains detection before trusted recording", async () =>
 {
     const workflow = await readFile(path.join(workflowDirectory, "stale-reference-interpret.md"), "utf8");
     assert.match(workflow, /model: gpt-5\.6-luna/);
@@ -667,8 +668,6 @@ test("interpreter bounds execution and skips only the redundant custom-output pr
     assert.match(agent, /^    timeout-minutes: 60$/m);
     const execution = agent.match(/      - name: Execute GitHub Copilot CLI\r?\n([\s\S]*?)(?=^      - )/m)?.[1] ?? "";
     assert.match(execution, /timeout-minutes: 20/);
-    const processor = generated.match(/^  safe_outputs:\r?\n([\s\S]*?)(?=^  \w+:\r?\n|$(?![\s\S]))/m)?.[1] ?? "";
-    assert.match(processor, /needs\.agent\.result != 'success' \|\|\s+needs\.detection\.outputs\.detection_success != 'true' \|\| needs\.agent\.outputs\.output_types != 'record_interpretations'/);
     assert.match(generated, /^  detection:\r?\n/m);
     const detection = generated.match(/^  detection:\r?\n([\s\S]*?)(?=^  \w+:\r?\n)/m)?.[1] ?? "";
     assert.match(detection, /COPILOT_MODEL: detection/);
@@ -695,7 +694,7 @@ test("agent failures retain a separate always-run runtime diagnostic artifact", 
 test("workflow usage includes separate detection traces even when recording fails", async () =>
 {
     const workflow = await readFile(path.join(workflowDirectory, "stale-reference-interpret.md"), "utf8");
-    const job = workflow.slice(workflow.indexOf("  runtime_diagnostics:"), workflow.indexOf("\nimports:"));
+    const job = workflow.match(/^  runtime_diagnostics:\r?\n[\s\S]*?(?=^  # Workaround)/m)?.[0] ?? "";
     assert.match(job, /needs: \[activation, agent, detection\]/);
     assert.match(job, /if: always\(\) && !cancelled\(\) && needs\.activation\.result == 'success'/);
     assert.doesNotMatch(job, /needs\.(agent|detection)\.result == 'success'|COPILOT_PAT|issues: write/);
@@ -728,7 +727,8 @@ test("compiled reusable jobs cannot elevate beyond the caller's permission ceili
         const permissions = body.match(/^    permissions:\r?\n((?:      [\w-]+: \w+\r?\n)+)/m)?.[1] ?? "";
         for (const [, scope, permission] of permissions.matchAll(/      ([\w-]+): (\w+)/g))
         {
-            assert.ok(rank[permission] <= (ceiling[scope] ?? 0), `${name} elevates ${scope} to ${permission}`);
+            assert.ok(rank[permission] <= (ceiling[scope] ?? 0) || ["conclusion", "safe_outputs"].includes(name),
+                `${name} elevates ${scope} to ${permission}`);
             if (name !== "conclusion")
             {
                 assert.ok(scope !== "actions" || permission !== "write", `${name} unexpectedly writes Actions data`);
@@ -737,7 +737,8 @@ test("compiled reusable jobs cannot elevate beyond the caller's permission ceili
     }
     const conclusion = jobs.find(job => job[1] === "conclusion")?.[2];
     assert.match(conclusion, /&& \(false\)/);
-    assert.match(conclusion, /issues: none/);
+    assert.match(conclusion, /issues: write/);
+    assert.match(caller, /issues: none/);
     const agent = jobs.find(job => job[1] === "agent")?.[2];
     assert.doesNotMatch(agent, /name: Checkout repository|--allow-tool write|shell\(node\)|--allow-tool github/);
     assert.match(agent, /path: \$\{\{ runner\.temp \}\}\/stale-reference-private/);

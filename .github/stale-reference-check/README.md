@@ -32,10 +32,6 @@ Recording requires successful detection and source validation. The compiler's
 conclusion job is disabled because this compiler version can otherwise create
 diagnostic issues outside the filing limit and preview guard. Native job results,
 logs, and the deterministic decision report provide diagnostics instead.
-The generic safe-output processor is skipped only when the agent succeeds,
-detection approves the output, and `record_interpretations` is the sole output
-type. Missing-tool, missing-data, noop, and mixed-output cases retain the standard
-processor; threat detection and the custom validation job are not bypassed.
 
 ## Scope and bounds
 
@@ -53,7 +49,7 @@ context; there is no shared-context representation. Each batch contains at most
 
 The reader presents that batch as consecutive, labeled text pages rather than
 one large batch object. Every text response is at most 12 KiB including the
-[pinned MCP adapter's JSON string encoding](https://github.com/github/gh-aw/blob/v0.88.7/actions/setup/js/mcp_handler_process.cjs#L143-L160),
+[pinned MCP adapter's JSON string encoding](https://github.com/github/gh-aw/blob/v0.89.17/actions/setup/js/mcp_handler_process.cjs#L143-L160),
 with an explicit next-page number. The adapter can expose escaped newlines even
 for string results; native calls and bounded pages eliminate the need for shell
 extraction, not the runtime's JSON encoding.
@@ -91,31 +87,27 @@ The native schema declares an object; the host validator, not that type
 declaration alone, enforces the complete nested result contract.
 
 An accepted payload is frozen in the private host process. The tool returns a
-SHA-256 receipt; the agent calls `record_interpretations` once with that receipt
-instead of regenerating the JSON. Repeating the identical accepted submission
-returns the same receipt; replacing it is rejected. A trusted post-step matches
-the queued receipt and inserts the full validated payload into `agent_output.json`
-before either agent-output artifact is uploaded, so threat detection inspects
-the actual results, not just a hash. It also exports `submission.json` with the
-context evidence. Recording requires matching receipts and payloads and reruns
-validation against committed blobs; preflight acceptance alone never authorizes
-filing.
+SHA-256 receipt; repeating the identical accepted submission returns the same
+receipt, while replacing it is rejected. A trusted post-step inserts the full
+validated payload and receipt into `agent_output.json` before the agent artifact
+is uploaded, so threat detection inspects the actual results, not just a hash.
+It also exports `submission.json` with the context evidence. After successful
+threat detection, a trusted recording job downloads the exact agent artifact
+that detection inspected and verifies its payload and receipt against
+`submission.json` before rerunning validation against committed blobs. Preflight
+acceptance and threat detection alone never authorize filing.
 
-The [gh-aw safe-output handler](https://github.com/github/gh-aw/blob/v0.88.7/actions/setup/js/safe_outputs_handlers.cjs#L534-L581)
-only acknowledges queueing a custom output. Its success response does not mean
-the later job has validated or recorded it. This distinction is why validation
-lives in the interactive host tool, rather than only in the downstream job.
+The source-specific recorder deliberately uses a normal trusted job instead of
+`safe-outputs.jobs` as a workaround for
+[github/gh-aw#62458](https://github.com/github/gh-aw/issues/62458), which causes
+v0.89.17 to reject its own detector token-usage artifact paths. The job preserves
+the safe-output boundary by requiring both successful detection and a matching
+trusted payload; the agent cannot invoke the job or write its result.
 
-The gh-aw v0.88.7 compiler's default MCP gateway v0.4.18 cannot negotiate native
-clients' stateless discovery correctly. The supported
-[`aw.json` container mapping](../workflows/aw.json) replaces that exact image with
-digest-pinned v0.4.24, which includes the
-[upstream protocol fallback fix](https://github.com/github/gh-aw-mcpg/pull/13221).
-Strict mode, sandboxing, and permissions remain unchanged. This is a
-[repository-wide compiler mapping](https://github.com/github/gh-aw/blob/v0.88.7/pkg/workflow/compiler_repo_config.go):
-it affects future compilations that reference v0.4.18, not existing lock files
-or other gateway versions. Remove it when upgrading the compiler to a compatible
-default, and rerun the protocol smoke check.
+The gh-aw v0.89.17 compiler defaults to MCP gateway v0.4.25, which the protocol
+smoke test validates for native clients' stateful fallback initialization. Strict
+mode, sandboxing, and permissions remain unchanged. The generated lock pins that
+compiler-selected image to an immutable digest.
 
 The interpreter pins `gpt-5.6-luna` and permits at most 64 agent turns and
 150 AI credits, retaining the 20-minute agent-execution timeout. The generated
@@ -129,7 +121,7 @@ The bounded reader in
 is outside the agent's filesystem mounts. Only selected batch/context results
 cross that boundary. The host enforces the expansion and response-size limits.
 Because the pinned
-[gh-aw runtime](https://github.com/github/gh-aw/blob/v0.88.7/actions/setup/js/mcp_server_core.cjs)
+[gh-aw runtime](https://github.com/github/gh-aw/blob/v0.89.17/actions/setup/js/mcp_server_core.cjs)
 launches a fresh process per MCP script call, a private loopback reader retains the shared
 budget and accepted submission. Source calls only read source; submission calls
 validate and retain one payload without GitHub access or issue/cache writes.
@@ -316,10 +308,10 @@ The fast fixture tests remain independent of Docker. The protocol check does not
 replace an end-to-end hosted preview of the interpreter.
 
 Edit the interpreter Markdown, never its generated lock file. The checked-in
-workflow is compiled with gh-aw v0.88.7 and its matching immutable runtime:
+workflow is compiled with gh-aw v0.89.17 and its matching immutable runtime:
 
 ```powershell
-gh aw compile stale-reference-interpret --action-mode action --action-tag v0.88.7
+gh aw compile stale-reference-interpret --action-mode action --action-tag v0.89.17
 ```
 
 When changing the compiler/runtime together, regenerate only this workflow and

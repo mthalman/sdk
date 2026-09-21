@@ -5,7 +5,6 @@ on:
     paths:
       - '.github/stale-reference-check/**'
       - '.github/workflows/stale-reference-*'
-      - '.github/workflows/aw.json'
   workflow_dispatch:
 
 permissions:
