@@ -263,6 +263,13 @@ report `insufficient_context`; do not infer missing identifiers or URLs.
 - Select only relevant blocking URLs actually present in the source. Include
   all blockers for that action, but exclude incidental and independent nearby
   references. No abbreviated or invented GitHub URLs.
+- Every `actions[].urls` entry must identify a GitHub issue or pull request:
+  `https://github.com/OWNER/REPO/issues/NUMBER` or
+  `https://github.com/OWNER/REPO/pull/NUMBER` (optional query/fragment allowed).
+  Source-code links (`/blob/`, `/tree/`), commits, repository homepages, and
+  documentation are supporting context, never blocker URLs. Exclude them even
+  when the same comment also contains a valid issue/PR blocker. Do not convert
+  a code link into an invented issue URL.
 - Preserve additional conditions such as consuming a fixed dependency version.
   A later issue will ask the assignee to verify these conditions; do not assert
   they have been met.
@@ -275,6 +282,10 @@ report `insufficient_context`; do not infer missing identifiers or URLs.
   the site requires maintainer review without including sensitive details.
 
 ## Return structured results
+
+Before submitting, check every `actions[].urls` entry against the issue/PR URL
+forms above. A single unsupported URL rejects the entire batch; a relevant
+source-code link belongs in neither the blocker list nor a separate action.
 
 Call the native `record_interpretations` tool exactly once with one argument,
 `payload`. Its value is a **string containing serialized JSON**, not an object.
