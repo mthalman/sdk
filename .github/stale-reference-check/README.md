@@ -103,6 +103,13 @@ The source-specific recorder deliberately uses a normal trusted job instead of
 v0.89.17 to reject its own detector token-usage artifact paths. The job preserves
 the safe-output boundary by requiring both successful detection and a matching
 trusted payload; the agent cannot invoke the job or write its result.
+The v0.89.17 compiler nevertheless emits internal `safe_outputs` and `conclusion`
+jobs that request `issues: write`. GitHub validates nested reusable-workflow
+permissions before evaluating those jobs' conditions, so the driver must grant
+that permission to the interpreter call for the workflow to start. The source
+workflow does not configure a custom safe-output handler, and the trusted recorder
+remains read-only; this is a compiler-imposed permission tradeoff tracked by the
+same issue.
 
 The gh-aw v0.89.17 compiler defaults to MCP gateway v0.4.25, which the protocol
 smoke test validates for native clients' stateful fallback initialization. Strict

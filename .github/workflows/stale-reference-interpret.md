@@ -77,6 +77,8 @@ jobs:
           retention-days: 7
   # Workaround for https://github.com/github/gh-aw/issues/62458: keep this
   # source-specific recorder outside safe-outputs.jobs so v0.89.17 can compile.
+  # gh-aw still emits issue-writing internal jobs, so the caller must grant
+  # issue write permission even though this recorder itself is read-only.
   record_interpretations:
     needs: [activation, agent, detection]
     if: >-

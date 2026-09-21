@@ -545,17 +545,17 @@ test("host-side source tools expose only the batch and enforce shared expansion 
     assert.throws(() => tools.readContext(request), /budget is exhausted/);
 });
 
-test("production driver serializes main-only runs and supports cached-only finalization", async () =>
+test("fork driver serializes main-only runs and supports cached-only finalization", async () =>
 {
     const workflow = await readFile(path.join(workflowDirectory, "stale-reference-check.yml"), "utf8");
     assert.match(workflow, /group: stale-reference-check/);
     assert.match(workflow, /cancel-in-progress: false/);
-    assert.match(workflow, /github\.event\.repository\.fork == false && github\.ref == 'refs\/heads\/main'/);
+    assert.match(workflow, /github\.repository == 'mthalman\/sdk' && github\.ref == 'refs\/heads\/main'/);
     assert.match(workflow, /needs\.interpret\.result == 'success' \|\| needs\.interpret\.result == 'skipped'/);
     assert.match(workflow, /inputs\.dry_run/);
     assert.match(workflow, /env\.DRY_RUN != 'true'/);
     assert.doesNotMatch(workflow, /pull_request:/);
-    assert.equal((workflow.match(/issues: write/g) ?? []).length, 1);
+    assert.equal((workflow.match(/issues: write/g) ?? []).length, 2);
 });
 
 test("agent records source interpretations without issue writes or GitHub tools", async () =>
@@ -711,14 +711,14 @@ test("workflow usage includes separate detection traces even when recording fail
     assert.match(caller, /name: stale-reference-workflow-runtime-\$\{\{ needs\.collect\.outputs\.input_artifact_id \}\}/);
 });
 
-test("compiled reusable jobs cannot elevate beyond the caller's permission ceiling", async () =>
+test("caller grants the compiler-required permissions and interpreter jobs remain read-only", async () =>
 {
     const generated = await readFile(path.join(workflowDirectory, "stale-reference-interpret.lock.yml"), "utf8");
     const caller = await readFile(path.join(workflowDirectory, "stale-reference-check.yml"), "utf8");
     assert.doesNotMatch(caller, /secrets: inherit/);
     assert.match(caller, /input_artifact_id: \$\{\{ steps\.upload\.outputs\.artifact-id \}\}/);
     assert.match(caller, /name: stale-reference-interpretations-\$\{\{ needs\.collect\.outputs\.input_artifact_id \}\}/);
-    const ceiling = { actions: 2, contents: 1, "copilot-requests": 2, issues: 0 };
+    const ceiling = { actions: 2, contents: 1, "copilot-requests": 2, issues: 2 };
     const rank = { none: 0, read: 1, write: 2 };
     const jobs = [...generated.matchAll(/^  ([a-z_]+):\r?\n([\s\S]*?)(?=^  [a-z_]+:\r?\n|$(?![\s\S]))/gm)];
     assert.ok(jobs.some(job => job[1] === "agent"));
@@ -727,7 +727,7 @@ test("compiled reusable jobs cannot elevate beyond the caller's permission ceili
         const permissions = body.match(/^    permissions:\r?\n((?:      [\w-]+: \w+\r?\n)+)/m)?.[1] ?? "";
         for (const [, scope, permission] of permissions.matchAll(/      ([\w-]+): (\w+)/g))
         {
-            assert.ok(rank[permission] <= (ceiling[scope] ?? 0) || ["conclusion", "safe_outputs"].includes(name),
+            assert.ok(rank[permission] <= (ceiling[scope] ?? 0),
                 `${name} elevates ${scope} to ${permission}`);
             if (name !== "conclusion")
             {
@@ -738,7 +738,9 @@ test("compiled reusable jobs cannot elevate beyond the caller's permission ceili
     const conclusion = jobs.find(job => job[1] === "conclusion")?.[2];
     assert.match(conclusion, /&& \(false\)/);
     assert.match(conclusion, /issues: write/);
-    assert.match(caller, /issues: none/);
+    const safeOutputs = jobs.find(job => job[1] === "safe_outputs")?.[2];
+    assert.match(safeOutputs, /issues: write/);
+    assert.match(caller, /issues: write/);
     const agent = jobs.find(job => job[1] === "agent")?.[2];
     assert.doesNotMatch(agent, /name: Checkout repository|--allow-tool write|shell\(node\)|--allow-tool github/);
     assert.match(agent, /path: \$\{\{ runner\.temp \}\}\/stale-reference-private/);

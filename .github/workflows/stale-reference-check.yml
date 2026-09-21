@@ -60,13 +60,13 @@ jobs:
     needs: collect
     if: github.repository == 'mthalman/sdk' && github.ref == 'refs/heads/main' && needs.collect.outputs.has_misses == 'true'
     permissions:
-      # The compiler declares this for its disabled conclusion job. Executing
-      # interpreter jobs explicitly retain read-only Actions permissions and
-      # cannot elevate to issue writes.
+      # gh-aw v0.89.17 generates safe_outputs and conclusion jobs that request
+      # this permission even when disabled. GitHub validates those requests
+      # before evaluating job conditions; see github/gh-aw#62458.
       actions: write
       contents: read
       copilot-requests: write
-      issues: none
+      issues: write
     uses: ./.github/workflows/stale-reference-interpret.lock.yml
     with:
       input_artifact_id: ${{ needs.collect.outputs.input_artifact_id }}
