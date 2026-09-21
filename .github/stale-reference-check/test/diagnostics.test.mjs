@@ -164,6 +164,23 @@ test("zero runtime failure counts produce no runtime warnings", t => {
     assert.deepEqual(report.diagnostics, []);
 });
 
+test("synchronous submission rejections are counted without exposing payload errors", t => {
+    const directory = fixture(t);
+    complete(directory);
+    jsonl(directory, rpcPath, [
+        request("prepare_interpretations"),
+        response({ result: { isError: true, content: [{
+            type: "text", text: "Submission rejected: Invalid JSON: DO-NOT-ECHO. 2 attempts remaining.",
+        }] } }),
+        request("prepare_interpretations"), response({ result: { content: [] } }),
+        request("record_interpretations", undefined, "safeoutputs"), response({ result: {} }, { server_id: "safeoutputs" }),
+    ]);
+    const report = collectDiagnostics(directory);
+    assert.equal(report.metrics.rejectedOutputSubmissions, 1);
+    assert.equal(report.metrics.contextReadCalls, 0);
+    assert.doesNotMatch(JSON.stringify(report), /DO-NOT-ECHO/);
+});
+
 test("missing artifacts and missing directory produce unavailable metrics, not zeros", t => {
     const directory = fixture(t);
     for (const path of [directory, join(directory, "absent")]) {
@@ -350,9 +367,9 @@ test("incomplete or ambiguous RPC exchanges do not imply zero failures", t => {
     const directory = fixture(t);
     complete(directory);
     for (const [rows, contextFailures, outputFailures] of [
-        [[request("read_context")], null, 0],
-        [[request("read_context"), request("read_batch"), response({ error: { message: budgetMessage } })], null, 0],
-        [[response()], null, 0],
+        [[request("read_context")], null, null],
+        [[request("read_context"), request("read_batch"), response({ error: { message: budgetMessage } })], null, null],
+        [[response()], null, null],
         [[request("record_interpretations", undefined, "safeoutputs"), response({}, { server_id: "safeoutputs" })], 0, null],
         [[request("record_interpretations", undefined, "safeoutputs"), request("noop", undefined, "safeoutputs"),
             response({ error: { message: "Invalid arguments" } }, { server_id: "safeoutputs" }),

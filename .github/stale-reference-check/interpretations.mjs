@@ -1,7 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-import { assertRepoPath, numberedContext, readSource, sourceId } from './collect.mjs';
+import { assertRepoPath, numberedContext, readSource, sourceId, sourceLines } from './collect.mjs';
 
 const statuses = new Set(['actionable', 'irrelevant', 'insufficient_context']);
 const kinds = new Set(['ignore', 'todo', 'workaround']);
@@ -320,6 +320,23 @@ export async function readContext(repoRoot, manifest, { candidateId, startLine, 
 }
 
 export async function validateInterpretations(payload, manifest, { repoRoot, expectedCandidateIds, contextEvidence } = {}) {
+    return validateWithSources(payload, manifest, expectedCandidateIds, contextEvidence,
+        candidate => readSource(repoRoot, candidate));
+}
+
+// Private collection snapshots allow the same checks while the agent has no source checkout.
+// The recording job must still call validateInterpretations against committed source.
+export async function validateSnapshotInterpretations(payload, manifest, { sources, expectedCandidateIds, contextEvidence }) {
+    return validateWithSources(payload, manifest, expectedCandidateIds, contextEvidence, candidate => {
+        requireCondition(Object.hasOwn(sources, candidate.path) && typeof sources[candidate.path] === 'string',
+            'The trusted source snapshot is missing.');
+        const lines = sourceLines(sources[candidate.path]);
+        requireCondition(lines.length === candidate.sourceLineCount, 'Source snapshot line count mismatch.');
+        return lines;
+    });
+}
+
+async function validateWithSources(payload, manifest, expectedCandidateIds, contextEvidence, readCandidateSource) {
     const candidates = checkManifest(manifest);
     keys(payload, ['schemaVersion', 'results'], 'Interpretation payload');
     requireCondition(payload.schemaVersion === 1, 'Unsupported interpretation schemaVersion.');
@@ -342,7 +359,7 @@ export async function validateInterpretations(payload, manifest, { repoRoot, exp
                 keys(expansion, ['candidateId', 'startLine', 'endLine'], 'Trusted context receipt');
                 range(expansion, candidate.sourceLineCount, 80);
                 const fileKey = `${candidate.path}\0${candidate.blobSha}`;
-                if (!sources.has(fileKey)) sources.set(fileKey, await readSource(repoRoot, candidate));
+                if (!sources.has(fileKey)) sources.set(fileKey, await readCandidateSource(candidate));
                 expansion = {
                     ...expansion, path: candidate.path, blobSha: candidate.blobSha,
                     sourceLineCount: candidate.sourceLineCount,
@@ -365,13 +382,17 @@ export async function validateInterpretations(payload, manifest, { repoRoot, exp
         const cached = validatedResultObjects.has(result);
         const expansions = expansionsFor(candidate, cached ? result.contextExpansions ?? [] : undefined);
         const fileKey = `${candidate.path}\0${candidate.blobSha}`;
-        if (!sources.has(fileKey)) sources.set(fileKey, await readSource(repoRoot, candidate));
+        if (!sources.has(fileKey)) sources.set(fileKey, await readCandidateSource(candidate));
         const lines = sources.get(fileKey);
         for (const evidence of [candidate, ...expansions]) {
             requireCondition(evidence.context === numberedContext(lines, evidence.startLine, evidence.endLine),
                 'Source evidence does not match the current blob.');
         }
-        results.push(validateResult(result, candidate, { cached }));
+        try {
+            results.push(validateResult(result, candidate, { cached }));
+        } catch (error) {
+            throw new Error(`Candidate ${candidate.id}: ${error.message}`, { cause: error });
+        }
     }
     return results;
 }

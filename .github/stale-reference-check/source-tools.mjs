@@ -1,11 +1,48 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { validateSnapshotInterpretations } from "./interpretations.mjs";
 
 const readers = new Map();
+const maxSubmissionBytes = 512 * 1024;
+
+export function submissionReceipt(payload)
+{
+    return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+export function verifySubmission(submission, receipt)
+{
+    if (submission?.schemaVersion !== 1 || !submission.payload ||
+        Object.keys(submission).some(key => !["schemaVersion", "receipt", "payload"].includes(key)) ||
+        typeof receipt !== "string" || !/^[a-f0-9]{64}$/.test(receipt) ||
+        Buffer.byteLength(JSON.stringify(submission.payload), "utf8") > maxSubmissionBytes ||
+        submission.receipt !== receipt || submissionReceipt(submission.payload) !== receipt)
+    {
+        throw new Error("The recording receipt does not match the trusted validated submission.");
+    }
+    return submission.payload;
+}
+
+// Expand the receipt in the trusted post-step, before the framework uploads the
+// agent artifact. Threat detection must inspect the full payload, not just its hash.
+export async function completeSubmission(directory, outputFile)
+{
+    const submission = await requestSourceTools(directory, "submission");
+    const output = JSON.parse(await readFile(outputFile, "utf8"));
+    const items = Array.isArray(output?.items) ? output.items.filter(item => item?.type === "record_interpretations") : null;
+    if (!Array.isArray(items) || items.length !== 1 ||
+        Object.keys(items[0]).some(key => key !== "type" && key !== "receipt"))
+    {
+        throw new Error("Expected exactly one unexpanded record_interpretations receipt.");
+    }
+    items[0].payload = verifySubmission(submission, items[0].receipt);
+    await writeFile(path.join(directory, "submission.json"), `${JSON.stringify(submission)}\n`);
+    await writeFile(outputFile, `${JSON.stringify(output)}\n`);
+}
 
 function declarationHints(candidate, source)
 {
@@ -115,6 +152,10 @@ async function loadSourceTools(directory)
     const pages = batchPages(batch, sources);
     const expansions = new Map();
     const windows = [];
+    let attempts = 0;
+    let preparing = false;
+    let submission;
+    let acceptedText;
     return {
         readBatch({ page = 1 } = {})
         {
@@ -172,6 +213,71 @@ async function loadSourceTools(directory)
         {
             return { schemaVersion: 1, windows: structuredClone(windows) };
         },
+        async prepareInterpretations({ payload })
+        {
+            if (submission)
+            {
+                if (payload !== acceptedText)
+                {
+                    throw new Error("A submission is already accepted; it cannot be replaced.");
+                }
+                return { receipt: submission.receipt };
+            }
+            if (preparing)
+            {
+                throw new Error("A submission is being validated; wait for its response.");
+            }
+            if (attempts >= 3)
+            {
+                throw new Error("The three-attempt submission budget is exhausted. Report missing_data; do not record.");
+            }
+            attempts++;
+            preparing = true;
+            try
+            {
+                if (typeof payload !== "string" || Buffer.byteLength(payload, "utf8") > maxSubmissionBytes)
+                {
+                    throw new Error("The submission must be a JSON string of at most 512 KiB.");
+                }
+                let parsed;
+                try
+                {
+                    parsed = JSON.parse(payload);
+                }
+                catch (error)
+                {
+                    if (!(error instanceof SyntaxError))
+                    {
+                        throw error;
+                    }
+                    throw new Error("Invalid JSON: complete all arrays and objects and escape string contents.");
+                }
+                const manifest = JSON.parse(await readFile(path.join(directory, "manifest.json"), "utf8"));
+                await validateSnapshotInterpretations(parsed, manifest, {
+                    sources, expectedCandidateIds: [...candidates.keys()],
+                    contextEvidence: { schemaVersion: 1, expansions: structuredClone(windows) },
+                });
+                submission = { schemaVersion: 1, receipt: submissionReceipt(parsed), payload: parsed };
+                acceptedText = payload;
+                return { receipt: submission.receipt };
+            }
+            catch (error)
+            {
+                throw new Error(`Submission rejected: ${error.message} ${3 - attempts} attempts remaining.`, { cause: error });
+            }
+            finally
+            {
+                preparing = false;
+            }
+        },
+        submission()
+        {
+            if (!submission)
+            {
+                throw new Error("No validated submission was accepted.");
+            }
+            return structuredClone(submission);
+        },
     };
 }
 
@@ -192,21 +298,26 @@ export async function startSourceServer(directory)
         try
         {
             if (request.method !== "POST" ||
-                !["/read-batch", "/read-context", "/evidence"].includes(request.url))
+                !["/read-batch", "/read-context", "/evidence", "/prepare-interpretations", "/submission"].includes(request.url))
             {
                 throw new Error("Unknown source-reader request.");
             }
             let body = "";
+            request.setEncoding("utf8");
+            // JSON encoding can expand every payload byte into an escape sequence.
+            const maxBodyBytes = request.url === "/prepare-interpretations" ? maxSubmissionBytes * 6 + 1024 : 4096;
             for await (const chunk of request)
             {
                 body += chunk;
-                if (Buffer.byteLength(body) > 4096)
+                if (Buffer.byteLength(body) > maxBodyBytes)
                 {
-                    throw new Error("Source-reader request exceeds 4 KiB.");
+                    throw new Error("Source-reader request exceeds its size limit.");
                 }
             }
             const args = JSON.parse(body || "{}");
             const result = request.url === "/read-batch" ? tools.readBatch(args)
+                : request.url === "/prepare-interpretations" ? await tools.prepareInterpretations(args)
+                : request.url === "/submission" ? tools.submission()
                 : request.url === "/evidence" ? tools.evidence() : tools.readContext(args);
             response.end(JSON.stringify(result));
         }
@@ -281,12 +392,16 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
             }
         }
     }
+    else if (operation === "complete" && outputFile)
+    {
+        await completeSubmission(directory, outputFile);
+    }
     else if (operation === "evidence" && outputFile)
     {
-        await writeFile(outputFile, `${JSON.stringify(await requestSourceTools(directory, "evidence"))}\n`);
+        await writeFile(outputFile, `${JSON.stringify(await requestSourceTools(directory, operation))}\n`);
     }
     else
     {
-        throw new Error("Expected serve, wait, or evidence with an output path.");
+        throw new Error("Expected serve, wait, evidence, or complete with an output path.");
     }
 }

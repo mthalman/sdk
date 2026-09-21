@@ -73,14 +73,18 @@ steps:
       fi
 
 post-steps:
-  - name: Export trusted context-expansion evidence
+  - name: Export trusted context evidence and validated submission
     env:
       STALE_REFERENCE_PRIVATE: ${{ runner.temp }}/stale-reference-private
-    run: node "$STALE_REFERENCE_PRIVATE/source-tools.mjs" evidence "$STALE_REFERENCE_PRIVATE" "$STALE_REFERENCE_PRIVATE/context-evidence.json"
+    run: |
+      node "$STALE_REFERENCE_PRIVATE/source-tools.mjs" evidence "$STALE_REFERENCE_PRIVATE" "$STALE_REFERENCE_PRIVATE/context-evidence.json"
+      node "$STALE_REFERENCE_PRIVATE/source-tools.mjs" complete "$STALE_REFERENCE_PRIVATE" /tmp/gh-aw/agent_output.json
   - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
     with:
       name: stale-reference-context-${{ inputs.input_artifact_id }}
-      path: ${{ runner.temp }}/stale-reference-private/context-evidence.json
+      path: |
+        ${{ runner.temp }}/stale-reference-private/context-evidence.json
+        ${{ runner.temp }}/stale-reference-private/submission.json
       overwrite: true
       if-no-files-found: error
       retention-days: 7
@@ -141,6 +145,20 @@ mcp-scripts:
       const directory = process.env.STALE_REFERENCE_PRIVATE;
       const { formatContext, requestSourceTools } = await import(pathToFileURL(join(directory, "source-tools.mjs")).href);
       return formatContext(await requestSourceTools(directory, "read-context", { candidateId, startLine, endLine }));
+  prepare_interpretations:
+    description: Validate the complete batch now against trusted source. Pass a serialized JSON payload string, at most 512 KiB. Invalid submissions return an error you can correct; at most three attempts. Success freezes the payload and returns its receipt for record_interpretations.
+    inputs:
+      payload:
+        type: string
+        required: true
+    env:
+      STALE_REFERENCE_PRIVATE: ${{ runner.temp }}/stale-reference-private
+    script: |
+      const { pathToFileURL } = await import("node:url");
+      const { join } = await import("node:path");
+      const directory = process.env.STALE_REFERENCE_PRIVATE;
+      const { requestSourceTools } = await import(pathToFileURL(join(directory, "source-tools.mjs")).href);
+      return requestSourceTools(directory, "prepare-interpretations", { payload });
 
 safe-outputs:
   threat-detection:
@@ -159,15 +177,15 @@ safe-outputs:
     report-as-issue: false
   jobs:
     record-interpretations:
-      description: Validate and record one complete batch of source interpretations, without creating issues.
+      description: Queue a validated batch for recording after threat detection. First call prepare_interpretations successfully, then pass its receipt unchanged. This call queues recording; the downstream job revalidates source before recording.
       runs-on: ubuntu-latest
       if: needs.detection.result == 'success' && needs.detection.outputs.detection_success == 'true'
       permissions:
         contents: read
         actions: read
       inputs:
-        payload:
-          description: A STRING containing serialized JSON with schemaVersion 1 and results for every supplied candidate ID. Pass one payload argument, not schemaVersion/results as tool arguments. Submit the complete real batch once.
+        receipt:
+          description: The exact 64-character receipt returned by prepare_interpretations. Never invent it or send the JSON payload here.
           required: true
           type: string
       steps:
@@ -287,7 +305,7 @@ Before submitting, check every `actions[].urls` entry against the issue/PR URL
 forms above. A single unsupported URL rejects the entire batch; a relevant
 source-code link belongs in neither the blocker list nor a separate action.
 
-Call the native `record_interpretations` tool exactly once with one argument,
+Call the native `prepare_interpretations` tool with one argument,
 `payload`. Its value is a **string containing serialized JSON**, not an object.
 For example, a one-candidate irrelevant result uses this argument shape:
 
@@ -340,5 +358,17 @@ other seed irrelevant with a reason pointing to the owning candidate ID.
 Do not supply issue prose, labels, repository destinations, paths, hashes,
 remote state, or arbitrary additional fields. Even if every candidate is
 irrelevant, record the complete batch rather than returning a bare noop.
-After successful submission, stop. Do not restate the analysis or calculate
+
+`prepare_interpretations` parses the JSON and validates every result against
+trusted source before accepting it. On rejection, correct the reported problem
+and resubmit the complete batch. There are at most three attempts total; do not
+send parallel submissions. If the budget is exhausted, report `missing_data`
+and stop without calling `record_interpretations`. No partial batch is accepted.
+
+Success returns a `receipt` and freezes the validated payload. Call
+`record_interpretations` exactly once with `{"receipt":"the returned receipt"}`.
+Do not resend or reconstruct the JSON, replace the accepted payload, or invent
+a receipt. The receipt only queues recording: threat detection and a separate
+committed-source validation must still pass before results can be used.
+After queueing the receipt, stop. Do not restate the analysis or calculate
 counts in a final narrative; trusted code publishes counts after validation.

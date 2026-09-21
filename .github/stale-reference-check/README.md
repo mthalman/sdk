@@ -38,8 +38,9 @@ Upstream blocker URLs remain read-only.
    classifications and selects a bounded batch of new or changed source.
 3. The [reusable interpreter](../workflows/stale-reference-interpret.md) identifies
    the actual action, owning declaration/test, and relevant blocking URLs. It
-   does not query GitHub or write issues. Its structured results are checked
-   against a separate trusted checkout before being retained.
+   does not query GitHub or write issues. A host-side submission tool validates
+   results against private source snapshots while the agent can still correct
+   errors. Recording revalidates against a separate trusted checkout.
 4. [`github.mjs`](github.mjs) deduplicates reference lookups and obtains current
    issue/PR states. [`finalize.mjs`](finalize.mjs) checks live tracking issues and
    creates fixed-template tasks. [`workflow.mjs`](workflow.mjs) connects these
@@ -98,8 +99,30 @@ deferred. Data rows do not create separate tracking issues.
 The interpreter uses native MCP calls, not shell-based CLI proxies. Bash and
 file editing are disabled; it has no source checkout, general-purpose Node
 execution, or GitHub tools. Native tool schemas define the input arguments,
-including the single JSON-string `payload` for `record_interpretations`, so the
+including the single JSON-string `payload` for `prepare_interpretations`, so the
 agent never needs temporary files or shell pipelines to submit its results.
+That tool parses and validates the entire batch synchronously, using the same
+[`interpretations.mjs`](interpretations.mjs) checks as the recording job. Invalid
+JSON, missing candidates, unsupported URLs, and unsupported source claims return
+errors while the agent is still running. The host permits three submission
+attempts, with no automatic JSON repair or partial acceptance.
+
+An accepted payload is frozen in the private host process. The tool returns a
+SHA-256 receipt; the agent calls `record_interpretations` once with that receipt
+instead of regenerating the JSON. Repeating the identical accepted submission
+returns the same receipt; replacing it is rejected. A trusted post-step matches
+the queued receipt and inserts the full validated payload into `agent_output.json`
+before either agent-output artifact is uploaded, so threat detection inspects
+the actual results, not just a hash. It also exports `submission.json` with the
+context evidence. Recording requires matching receipts and payloads and reruns
+validation against committed blobs; preflight acceptance alone never authorizes
+filing.
+
+The [gh-aw safe-output handler](https://github.com/github/gh-aw/blob/v0.88.7/actions/setup/js/safe_outputs_handlers.cjs#L534-L581)
+only acknowledges queueing a custom output. Its success response does not mean
+the later job has validated or recorded it. This distinction is why validation
+lives in the interactive host tool, rather than only in the downstream job.
+
 The gh-aw v0.88.7 compiler's default MCP gateway v0.4.18 cannot negotiate native
 clients' stateless discovery correctly. The supported
 [`aw.json` container mapping](../workflows/aw.json) replaces that exact image with
@@ -125,9 +148,12 @@ cross that boundary. The host enforces the expansion and response-size limits.
 Because the pinned
 [gh-aw runtime](https://github.com/github/gh-aw/blob/v0.88.7/actions/setup/js/mcp_server_core.cjs)
 launches a fresh process per MCP script call, a private loopback reader retains the shared
-budget. Tool calls only read source; a trusted post-agent step exports the served
-window receipts. Recording verifies them against source, and the cache retains
-the verified expansion evidence for later runners.
+budget and accepted submission. Source calls only read source; submission calls
+validate and retain one payload without GitHub access or issue/cache writes.
+A trusted post-agent step exports the served window receipts. Recording verifies
+them against source, and the cache retains the verified expansion evidence for
+later runners. The private artifact packages both validator and collector modules;
+preflight reads the snapshot and does not invoke Git or need a source checkout.
 
 ## Fresh runners and interpretation caching
 
@@ -154,9 +180,8 @@ cross-repository blockers. Fragments and query strings do not produce duplicate
 lookups. References through `/issues/` that identify a PR are checked as PRs.
 Code links (`/blob/`, `/tree/`), commits, repository homepages, and documentation
 may explain a workaround but cannot be submitted as blockers, even alongside a
-valid issue/PR. The interpreter prompt requires a final URL-shape check before
-submission; deterministic validation still rejects the entire batch if any
-unsupported URL slips through.
+valid issue/PR. Both synchronous submission validation and final recording reject
+the entire batch if any unsupported URL slips through.
 
 An issue qualifies only when closed **as completed**. A PR qualifies only when
 **merged**. All identified blockers for an action must qualify. Open/reopened
