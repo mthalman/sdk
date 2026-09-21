@@ -567,6 +567,7 @@ test("agent records source interpretations without issue writes or GitHub tools"
     assert.match(header, /workflow_call:/);
     assert.match(header, /record_interpretations:/);
     assert.match(header, /needs\.detection\.outputs\.detection_success == 'true'/);
+    assert.match(header, /model: gpt-5\.6-luna\r?\n  # Work around Copilot CLI 1\.0\.85[\s\S]*?version: 1\.0\.83/);
     assert.doesNotMatch(header, /issues: write|pull-requests: write|create-issue: true/);
     assert.doesNotMatch(header, /^\s+github:\s*$/m);
     assert.match(header, /github: false/);
