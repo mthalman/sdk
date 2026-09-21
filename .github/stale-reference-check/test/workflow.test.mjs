@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { expandContext, finish, prepare, printBatch, record, rulesHash } from "../workflow.mjs";
 import { completeSubmission, getSourceTools, requestSourceTools, startSourceServer, submissionReceipt } from "../source-tools.mjs";
 import { finishFork } from "../fork-only.mjs";
+import { collectWorkflowDiagnostics } from "../diagnostics.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const workflowDirectory = path.join(repository, ".github/workflows");
@@ -112,6 +113,41 @@ test("submission validation rejects malformed JSON synchronously and accepts a c
     await record(root, output);
     assert.deepEqual(JSON.parse(await readFile(path.join(root,
         ".stale-reference-check/results/interpretations.json"))), JSON.parse(payload));
+});
+
+test("native object submission serializes in the actual MCP script and retains host validation", async t =>
+{
+    const root = await fixture(t);
+    const { batch } = await prepare({ repoRoot: root, logger });
+    const directory = path.join(root, ".stale-reference-check/input");
+    for (const file of ["source-tools.mjs", "interpretations.mjs", "collect.mjs"])
+    {
+        await writeFile(path.join(directory, file),
+            await readFile(path.join(repository, ".github/stale-reference-check", file)));
+    }
+    const server = await startSourceServer(directory);
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const previous = process.env.STALE_REFERENCE_PRIVATE;
+    process.env.STALE_REFERENCE_PRIVATE = directory;
+    t.after(() =>
+    {
+        if (previous === undefined) delete process.env.STALE_REFERENCE_PRIVATE;
+        else process.env.STALE_REFERENCE_PRIVATE = previous;
+    });
+    const workflow = await readFile(path.join(workflowDirectory, "stale-reference-interpret.md"), "utf8");
+    const tool = workflow.slice(workflow.indexOf("  prepare_interpretations:"), workflow.indexOf("\nsafe-outputs:"));
+    const script = tool.slice(tool.indexOf("    script: |") + "    script: |".length);
+    const invoke = new (Object.getPrototypeOf(async function () {}).constructor)("payload", script);
+    const payload = { schemaVersion: 1, results: batch.candidates.map(candidate => ({
+        candidateId: candidate.id, status: "irrelevant", reason: "Quotes \" and slash \\ and newline\n\u00e9.", actions: [],
+    })) };
+    await assert.rejects(invoke(JSON.stringify(payload)), /Submission rejected:.*2 attempts remaining/);
+    await assert.rejects(invoke({ schemaVersion: 1, results: [] }), /expected candidate IDs.*1 attempts remaining/);
+    const accepted = await invoke(payload);
+    assert.equal(accepted.receipt, submissionReceipt(payload));
+    assert.deepEqual((await requestSourceTools(directory, "submission")).payload, payload);
+    payload.results[0].reason = "Changed after acceptance.";
+    await assert.rejects(invoke(payload), /already accepted/);
 });
 
 test("invalid candidates and blockers can be corrected but submission attempts are bounded", async t =>
@@ -328,6 +364,8 @@ test("first-run recording persists interpretations and cached-only finalization 
     assert.equal(first.interpretations.irrelevant, 1);
     assert.deepEqual(first.interpretations.batch, { actionable: 0, irrelevant: 1, deferred: 0 });
     assert.equal(first.runtime.metrics.requestCount, null);
+    const workflowRuntime = collectWorkflowDiagnostics(root, path.join(root, "missing-detection"));
+    await writeFile(path.join(root, ".stale-reference-check/results/workflow-runtime.json"), JSON.stringify(workflowRuntime));
     assert.ok(first.diagnostics.some(diagnostic => diagnostic.type === "agent-runtime" && diagnostic.code === "missing"));
     const next = await prepare({ repoRoot: root, logger });
     assert.equal(next.batch.candidates.length, 0);
@@ -337,6 +375,7 @@ test("first-run recording persists interpretations and cached-only finalization 
     assert.equal(second.interpretations.remaining, 0);
     assert.deepEqual(second.interpretations.batch, { actionable: 0, irrelevant: 0, deferred: 0 });
     assert.equal(second.runtime, null);
+    assert.equal(second.workflowRuntime, null);
 });
 
 test("preview does not save production interpretations", async (t) =>
@@ -357,6 +396,10 @@ test("runtime warnings survive finalization without using the agent's narrative 
     await writeFile(path.join(root, "agent-stdio.log"),
         "Permission denied and could not request permission from user\n15 actionable; 8 irrelevant\n");
     await recordIrrelevantBatch(root, batch);
+    const workflowRuntime = collectWorkflowDiagnostics(root, path.join(root, "missing-detection"));
+    await writeFile(path.join(root, ".stale-reference-check/results/workflow-runtime.json"), JSON.stringify(workflowRuntime));
+    process.env.GITHUB_STEP_SUMMARY = path.join(root, "summary.md");
+    t.after(() => delete process.env.GITHUB_STEP_SUMMARY);
     const github = new Proxy({}, { get() { throw new Error("No GitHub calls expected."); } });
     const report = await finish({ github, repository: "dotnet/sdk", repoRoot: root, dryRun: true, logger });
     assert.equal(report.runtime.metrics.deniedCommands, 1);
@@ -365,6 +408,11 @@ test("runtime warnings survive finalization without using the agent's narrative 
     assert.deepEqual(report.interpretations.batch, { actionable: 0, irrelevant: 1, deferred: 0 });
     const saved = JSON.parse(await readFile(path.join(root, ".stale-reference-check/report.json")));
     assert.deepEqual(saved.runtime, report.runtime);
+    assert.deepEqual(saved.workflowRuntime, workflowRuntime);
+    assert.ok(report.diagnostics.some(diagnostic =>
+        diagnostic.type === "workflow-runtime" && diagnostic.stage === "detection" && diagnostic.code === "missing"));
+    assert.match(await readFile(process.env.GITHUB_STEP_SUMMARY, "utf8"),
+        /AI credits \(requests\) \| Unavailable \| Unavailable \| Unavailable/);
 });
 
 test("expanded source evidence survives recording, separate jobs, and cached-only state checks", async (t) =>
@@ -591,8 +639,8 @@ test("agent transport uses native bounded text tools rather than shell serializa
     assert.match(header, /bash: false/);
     assert.match(header, /read_batch:[\s\S]*?page:[\s\S]*?type: number/);
     assert.match(header, /read_context:[\s\S]*?candidateId:/);
-    assert.match(header, /prepare_interpretations:[\s\S]*?payload:[\s\S]*?type: string/);
-    assert.match(header, /return requestSourceTools\(directory, "prepare-interpretations", \{ payload \}\)/);
+    assert.match(header, /prepare_interpretations:[\s\S]*?payload:[\s\S]*?type: object/);
+    assert.match(header, /return requestSourceTools\(directory, "prepare-interpretations", \{ payload: JSON\.stringify\(payload\) \}\)/);
     const recording = header.slice(header.indexOf("    record-interpretations:"));
     assert.match(recording, /inputs:\s*\n\s*receipt:/);
     assert.doesNotMatch(recording, /^\s+payload:/m);
@@ -604,6 +652,7 @@ test("agent transport uses native bounded text tools rather than shell serializa
     assert.match(workflow, /Source-code links \(`\/blob\/`, `\/tree\/`\)/);
     assert.match(workflow, /A single unsupported URL rejects the entire batch/);
     const generated = await readFile(path.join(workflowDirectory, "stale-reference-interpret.lock.yml"), "utf8");
+    assert.match(generated, /"name": "prepare_interpretations",[\s\S]*?"inputSchema": \{[\s\S]*?"payload": \{[^}]*"type": "object"/);
     const execution = generated.match(/      - name: Execute GitHub Copilot CLI\r?\n([\s\S]*?)(?=^      - )/m)?.[1] ?? "";
     assert.ok(execution.includes("--allow-tool mcpscripts --allow-tool safeoutputs"), "Native MCP tools must be allowed.");
     assert.doesNotMatch(execution, /--allow-tool.*shell\(|--allow-all-tools/);
@@ -699,6 +748,26 @@ test("agent failures retain a separate always-run runtime diagnostic artifact", 
     assert.match(agent.slice(summarize, summarize + 300), /diagnostics\.mjs" \/tmp\/gh-aw/);
     assert.match(agent, /name: stale-reference-runtime-\$\{\{ inputs\.input_artifact_id \}\}/);
     assert.match(agent, /path: \$\{\{ runner\.temp \}\}\/stale-reference-private\/runtime\.json/);
+});
+
+test("workflow usage includes separate detection traces even when recording fails", async () =>
+{
+    const workflow = await readFile(path.join(workflowDirectory, "stale-reference-interpret.md"), "utf8");
+    const job = workflow.slice(workflow.indexOf("  runtime_diagnostics:"), workflow.indexOf("\nimports:"));
+    assert.match(job, /needs: \[activation, agent, detection\]/);
+    assert.match(job, /if: always\(\) && !cancelled\(\) && needs\.activation\.result == 'success'/);
+    assert.doesNotMatch(job, /needs\.(agent|detection)\.result == 'success'|COPILOT_PAT|issues: write/);
+    assert.match(job, /pattern: "\{\$\{\{ needs\.activation\.outputs\.artifact_prefix \}\}agent,\$\{\{ needs\.activation\.outputs\.artifact_prefix \}\}detection\}"/);
+    assert.match(job, /merge-multiple: false/);
+    assert.match(job, /diagnostics\.mjs" --workflow/);
+    assert.match(job, /name: stale-reference-workflow-runtime-\$\{\{ inputs\.input_artifact_id \}\}/);
+    const generated = await readFile(path.join(workflowDirectory, "stale-reference-interpret.lock.yml"), "utf8");
+    const generatedJob = generated.match(/^  runtime_diagnostics:\r?\n([\s\S]*?)(?=^  \w+:\r?\n|$(?![\s\S]))/m)?.[1] ?? "";
+    assert.match(generatedJob, /always\(\) && !cancelled\(\)/);
+    assert.match(generatedJob, /merge-multiple: false/);
+    assert.match(generatedJob, /--workflow/);
+    const caller = await readFile(path.join(workflowDirectory, "stale-reference-check.yml"), "utf8");
+    assert.match(caller, /name: stale-reference-workflow-runtime-\$\{\{ needs\.collect\.outputs\.input_artifact_id \}\}/);
 });
 
 test("compiled reusable jobs cannot elevate beyond the caller's permission ceiling", async () =>

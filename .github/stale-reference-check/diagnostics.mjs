@@ -42,6 +42,9 @@ const isCount = value => Number.isSafeInteger(value) && value >= 0;
 const isCredits = value => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const isModel = value => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/.test(value);
 const emptyTokens = () => Object.fromEntries(Object.keys(tokenFields).map(key => [key, null]));
+const emptyRequestMetrics = () => ({
+    requestCount: null, models: null, modelDurationMs: null, ...emptyTokens(), aiCredits: null,
+});
 
 class Unavailable extends Error {
     constructor(code) {
@@ -364,11 +367,7 @@ export function collectDiagnostics(directory) {
     return {
         schemaVersion: 1,
         metrics: {
-            requestCount: null,
-            models: null,
-            modelDurationMs: null,
-            ...emptyTokens(),
-            aiCredits: null,
+            ...emptyRequestMetrics(),
             ...requests,
             agentUsage: agent ?? { ...emptyTokens(), ambientContextTokens: null, aiCredits: null, primaryModel: null },
             deniedCommands: denied,
@@ -381,6 +380,74 @@ export function collectDiagnostics(directory) {
     };
 }
 
+export function collectWorkflowDiagnostics(interpreterDirectory, detectionDirectory) {
+    const interpreter = collectDiagnostics(interpreterDirectory);
+    const detectionDiagnostics = [];
+    const detection = {
+        metrics: { ...emptyRequestMetrics(), ...requestUsage(detectionDirectory, detectionDiagnostics) },
+        diagnostics: detectionDiagnostics,
+    };
+    const diagnostics = [
+        ...interpreter.diagnostics.map(diagnostic => ({ stage: "interpreter", ...diagnostic })),
+        ...detection.diagnostics.map(diagnostic => ({ stage: "detection", ...diagnostic })),
+    ];
+    const total = emptyRequestMetrics();
+    for (const key of Object.keys(total)) {
+        const values = [interpreter.metrics[key], detection.metrics[key]];
+        if (key === "models") {
+            total.models = values.every(Array.isArray) ? [...new Set(values.flat())].sort() : null;
+        } else if (values.every(value => value !== null)) {
+            const sum = values[0] + values[1];
+            const valid = key === "aiCredits" ? isCredits(sum) : isCount(sum);
+            total[key] = valid ? (key === "aiCredits" ? Number(sum.toFixed(8)) : sum) : null;
+            if (!valid) {
+                diagnostics.push({ stage: "total", source: sources.requests, code: "incomplete", message: messages.incomplete });
+            }
+        }
+    }
+    return { schemaVersion: 1, interpreter, detection, total, diagnostics };
+}
+
+function diagnosticLines(diagnostics, includeStage = false) {
+    if (!Array.isArray(diagnostics) || !diagnostics.length) {
+        return [];
+    }
+    return ["", "### Diagnostic warnings", ...diagnostics.map(diagnostic => {
+        const source = Object.values(sources).includes(diagnostic?.source) ? diagnostic.source : "diagnostics";
+        const message = Object.hasOwn(messages, diagnostic?.code) ? messages[diagnostic.code] : "Diagnostic details are unavailable.";
+        const stage = includeStage && ["interpreter", "detection", "total"].includes(diagnostic?.stage) ? `${diagnostic.stage}: ` : "";
+        return `- ${stage}\`${source}\`: ${message}`;
+    })];
+}
+
+export function formatWorkflowDiagnostics(report) {
+    const stages = [report?.interpreter?.metrics ?? {}, report?.detection?.metrics ?? {}, report?.total ?? {}];
+    const lines = [
+        "## Stale-reference workflow model usage",
+        "",
+        "| Metric | Interpreter | Threat detection | Combined |",
+        "| --- | --- | --- | --- |",
+    ];
+    for (const [key, label] of [
+        ["requestCount", "Model requests"], ["models", "Models"],
+        ["modelDurationMs", "Model duration (summed request milliseconds)"],
+        ["inputTokens", "Input tokens"], ["outputTokens", "Output tokens"],
+        ["cacheReadTokens", "Cache read tokens"], ["cacheWriteTokens", "Cache write tokens"],
+        ["aiCredits", "AI credits (requests)"],
+    ]) {
+        const values = stages.map(stage => key === "models"
+            ? Array.isArray(stage.models) && stage.models.length
+                ? stage.models.map(model => isModel(model) ? `\`${model}\`` : "Unavailable").join(", ") : "Unavailable"
+            : isCredits(stage[key]) ? String(stage[key]) : "Unavailable");
+        lines.push(`| ${label} | ${values.join(" | ")} |`);
+    }
+    lines.push("", "Combined usage requires both stages; missing traces are unavailable, not zero. " +
+        "Tokens follow each provider's accounting, and summed model duration is not workflow wall time. " +
+        "Request credits do not include a second copy of agent_usage totals. These metrics never authorize findings.",
+        ...diagnosticLines(report?.diagnostics, true));
+    return lines.join("\n") + "\n";
+}
+
 /** Render only whitelisted metrics and fixed diagnostic messages, never artifact prose. */
 export function formatDiagnostics(report) {
     const metrics = report?.metrics ?? {};
@@ -388,7 +455,7 @@ export function formatDiagnostics(report) {
     const number = value => isCredits(value) ? String(value) : "Unavailable";
     const model = value => isModel(value) ? `\`${value}\`` : "Unavailable";
     const lines = [
-        "## Stale-reference runtime diagnostics",
+        "## Stale-reference interpreter runtime diagnostics",
         "",
         "| Metric | Value |",
         "| --- | --- |",
@@ -410,24 +477,20 @@ export function formatDiagnostics(report) {
         "",
         "These observational metrics do not validate or authorize findings. Permission denials count literal log occurrences, not unique commands.",
     ];
-    if (Array.isArray(report?.diagnostics) && report.diagnostics.length) {
-        lines.push("", "### Diagnostic warnings");
-        for (const diagnostic of report.diagnostics) {
-            const source = Object.values(sources).includes(diagnostic?.source) ? diagnostic.source : "diagnostics";
-            const message = Object.hasOwn(messages, diagnostic?.code) ? messages[diagnostic.code] : "Diagnostic details are unavailable.";
-            lines.push(`- \`${source}\`: ${message}`);
-        }
-    }
+    lines.push(...diagnosticLines(report?.diagnostics));
     return lines.join("\n") + "\n";
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-    if (process.argv.length !== 4) {
-        throw new Error("Usage: node diagnostics.mjs <artifact-directory> <output-file>");
+    const workflow = process.argv[2] === "--workflow";
+    if (process.argv.length !== (workflow ? 6 : 4)) {
+        throw new Error("Usage: node diagnostics.mjs <artifact-directory> <output-file> or " +
+            "node diagnostics.mjs --workflow <interpreter-directory> <detection-directory> <output-file>");
     }
-    const report = collectDiagnostics(process.argv[2]);
-    writeFileSync(process.argv[3], JSON.stringify(report) + "\n", "utf8");
+    const report = workflow ? collectWorkflowDiagnostics(process.argv[3], process.argv[4]) : collectDiagnostics(process.argv[2]);
+    writeFileSync(process.argv.at(-1), JSON.stringify(report) + "\n", "utf8");
     if (process.env.GITHUB_STEP_SUMMARY) {
-        appendFileSync(process.env.GITHUB_STEP_SUMMARY, formatDiagnostics(report), "utf8");
+        appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            workflow ? formatWorkflowDiagnostics(report) : formatDiagnostics(report), "utf8");
     }
 }

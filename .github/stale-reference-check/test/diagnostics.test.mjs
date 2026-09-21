@@ -8,7 +8,7 @@ import { copyFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, truncateSyn
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { collectDiagnostics, formatDiagnostics } from "../diagnostics.mjs";
+import { collectDiagnostics, collectWorkflowDiagnostics, formatDiagnostics, formatWorkflowDiagnostics } from "../diagnostics.mjs";
 
 const requestPath = join("sandbox", "firewall", "logs", "api-proxy-logs", "token-usage.jsonl");
 const alternateRequestPaths = [
@@ -494,6 +494,93 @@ test("summary cannot inject arbitrary artifact or diagnostic prose", () => {
     assert.match(summary, /Diagnostic details are unavailable/);
 });
 
+test("workflow usage separates stages and sums requests without duplicating agent usage or artifact copies", t => {
+    const directory = fixture(t);
+    const interpreter = join(directory, "interpreter");
+    const detection = join(directory, "detection");
+    complete(interpreter);
+    write(interpreter, "agent_usage.json", { ai_credits: 999 });
+    jsonl(interpreter, alternateRequestPaths[0], [usage()]);
+    jsonl(detection, requestPath, [
+        usage({ model: "detection-model", ai_credits_this_response: 0.2 }),
+        usage({ request_id: "request-2", model: "detection-model", ai_credits_this_response: 0.3 }),
+    ]);
+    const report = collectWorkflowDiagnostics(interpreter, detection);
+    assert.equal(report.interpreter.metrics.aiCredits, 0.1);
+    assert.equal(report.detection.metrics.aiCredits, 0.5);
+    assert.deepEqual(report.total, {
+        requestCount: 3, models: ["claude-sonnet-5", "detection-model"], modelDurationMs: 300,
+        inputTokens: 30, outputTokens: 60, cacheReadTokens: 90, cacheWriteTokens: 120, aiCredits: 0.6,
+    });
+    assert.deepEqual(report.detection.diagnostics, [], "Detection does not publish primary-agent usage or MCP logs.");
+    assert.match(formatWorkflowDiagnostics(report), /AI credits \(requests\) \| 0\.1 \| 0\.5 \| 0\.6/);
+});
+
+test("unavailable detection usage never becomes a partial combined total", t => {
+    const directory = fixture(t);
+    complete(directory);
+    const detection = join(directory, "detection");
+    const missing = collectWorkflowDiagnostics(directory, detection);
+    assert.equal(missing.interpreter.metrics.requestCount, 1);
+    assert.ok(Object.values(missing.total).every(value => value === null));
+    assert.ok(missing.diagnostics.some(diagnostic => diagnostic.stage === "detection" && diagnostic.code === "missing"));
+    jsonl(detection, requestPath, [usage(), { secret: "DO-NOT-ECHO" }]);
+    const malformed = collectWorkflowDiagnostics(directory, detection);
+    assert.equal(malformed.total.aiCredits, null);
+    assert.ok(malformed.diagnostics.some(diagnostic => diagnostic.stage === "detection" && diagnostic.code === "malformed"));
+    assert.doesNotMatch(JSON.stringify(malformed) + formatWorkflowDiagnostics(malformed), /DO-NOT-ECHO/);
+    assert.match(formatWorkflowDiagnostics(missing), /AI credits \(requests\) \| 0\.1 \| Unavailable \| Unavailable/);
+    assert.ok(Object.values(collectWorkflowDiagnostics(detection, directory).total).every(value => value === null));
+});
+
+test("conflicting, unsafe, and overflowing stage usage cannot produce believable totals", t => {
+    const directory = fixture(t);
+    complete(directory);
+    const detection = join(directory, "detection");
+    jsonl(detection, requestPath, [usage()]);
+    jsonl(detection, alternateRequestPaths[0], [usage({ ai_credits_this_response: 0.2 })]);
+    let report = collectWorkflowDiagnostics(directory, detection);
+    assert.equal(report.total.aiCredits, null);
+    assert.ok(report.diagnostics.some(diagnostic => diagnostic.stage === "detection" && diagnostic.code === "conflict"));
+    rmSync(join(detection, alternateRequestPaths[0]));
+    jsonl(detection, requestPath, [usage({ duration_ms: Number.MAX_SAFE_INTEGER, ai_credits_this_response: Number.MAX_VALUE })]);
+    jsonl(directory, requestPath, [usage({ ai_credits_this_response: Number.MAX_VALUE })]);
+    report = collectWorkflowDiagnostics(directory, detection);
+    assert.equal(report.total.modelDurationMs, null);
+    assert.equal(report.total.aiCredits, null);
+    assert.ok(report.diagnostics.some(diagnostic => diagnostic.stage === "total" && diagnostic.code === "incomplete"));
+    const linked = join(directory, "linked-detection");
+    symlinkSync(detection, linked, process.platform === "win32" ? "junction" : "dir");
+    report = collectWorkflowDiagnostics(directory, linked);
+    assert.equal(report.total.requestCount, null);
+    assert.ok(report.diagnostics.some(diagnostic => diagnostic.stage === "detection" && diagnostic.code === "unsafe"));
+});
+
+test("combined summary cannot inject arbitrary stage or artifact prose", () => {
+    const summary = formatWorkflowDiagnostics({
+        interpreter: { metrics: { aiCredits: "DO-NOT-ECHO" } },
+        detection: { metrics: { models: ["<img src=x>", "DO-NOT-ECHO\n"] } },
+        total: { requestCount: "DO-NOT-ECHO" },
+        diagnostics: [{ stage: "DO-NOT-ECHO", source: "DO-NOT-ECHO", code: "DO-NOT-ECHO", message: "DO-NOT-ECHO" }],
+    });
+    assert.doesNotMatch(summary, /DO-NOT-ECHO|<img/);
+    assert.match(summary, /Diagnostic details are unavailable/);
+});
+
+test("combined CLI writes usage and warnings when the detector artifact is absent", t => {
+    const directory = fixture(t);
+    complete(directory);
+    const output = join(directory, "workflow-runtime.json");
+    const summary = join(directory, "summary.md");
+    const result = spawnSync(process.execPath, [modulePath, "--workflow", directory, join(directory, "absent"), output], {
+        encoding: "utf8", env: { ...process.env, GITHUB_STEP_SUMMARY: summary },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(output, "utf8")), collectWorkflowDiagnostics(directory, join(directory, "absent")));
+    assert.match(readFileSync(summary, "utf8"), /Threat detection \| Combined/);
+    assert.match(readFileSync(summary, "utf8"), /detection:.*Artifact is missing/);
+});
+
 test("CLI writes compact JSON and appends a summary even when traces are missing", t => {
     const directory = fixture(t);
     const output = join(directory, "diagnostics.json");
@@ -506,7 +593,7 @@ test("CLI writes compact JSON and appends a summary even when traces are missing
     const text = readFileSync(output, "utf8");
     assert.equal(text.trim().split("\n").length, 1);
     assert.deepEqual(JSON.parse(text), collectDiagnostics(join(directory, "absent")));
-    assert.match(readFileSync(summary, "utf8"), /^Existing summary\n## Stale-reference runtime diagnostics/);
+    assert.match(readFileSync(summary, "utf8"), /^Existing summary\n## Stale-reference interpreter runtime diagnostics/);
     assert.equal(result.stdout, "");
 });
 
