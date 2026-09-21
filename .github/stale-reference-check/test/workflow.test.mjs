@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { after, before } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { expandContext, finish, prepare, printBatch, record, rulesHash } from "../workflow.mjs";
-import { getSourceTools, requestSourceTools, startSourceServer } from "../source-tools.mjs";
+import { completeSubmission, getSourceTools, requestSourceTools, startSourceServer, submissionReceipt } from "../source-tools.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const workflowDirectory = path.join(repository, ".github/workflows");
@@ -68,6 +68,177 @@ async function fixture(t, padding = 0)
 
 const logger = { info() {}, warn() {} };
 
+async function stageSubmission(root, payload)
+{
+    const directory = path.join(root, ".stale-reference-check/input");
+    const tools = await getSourceTools(directory);
+    const accepted = await tools.prepareInterpretations({ payload: JSON.stringify(payload) });
+    await writeFile(path.join(directory, "submission.json"), JSON.stringify(tools.submission()));
+    await writeFile(path.join(directory, "context-evidence.json"), JSON.stringify(tools.evidence()));
+    return { type: "record_interpretations", ...accepted, payload: tools.submission().payload };
+}
+
+test("submission validation rejects malformed JSON synchronously and accepts a corrected immutable payload", async t =>
+{
+    const root = await fixture(t);
+    const { batch } = await prepare({ repoRoot: root, logger });
+    const directory = path.join(root, ".stale-reference-check/input");
+    const server = await startSourceServer(directory);
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const payload = JSON.stringify({
+        schemaVersion: 1,
+        results: batch.candidates.map(candidate => ({
+            candidateId: candidate.id, status: "irrelevant", reason: "Fixture.", actions: [],
+        })),
+    });
+    await assert.rejects(requestSourceTools(directory, "prepare-interpretations",
+        { payload: payload.slice(0, -2) }), /Invalid JSON.*2 attempts remaining/);
+    await assert.rejects(requestSourceTools(directory, "submission"), /No validated submission/);
+    const accepted = await requestSourceTools(directory, "prepare-interpretations", { payload });
+    assert.match(accepted.receipt, /^[a-f0-9]{64}$/);
+    assert.deepEqual(await requestSourceTools(directory, "prepare-interpretations", { payload }), accepted);
+    await assert.rejects(requestSourceTools(directory, "prepare-interpretations",
+        { payload: payload.replace("Fixture.", "Changed.") }), /already accepted/);
+    const submission = await requestSourceTools(directory, "submission");
+    assert.deepEqual(submission, { schemaVersion: 1, receipt: accepted.receipt, payload: JSON.parse(payload) });
+    await writeFile(path.join(directory, "submission.json"), JSON.stringify(submission));
+    const output = path.join(root, "output.json");
+    await writeFile(output, JSON.stringify({ items: [{ type: "record_interpretations", ...accepted }] }));
+    await assert.rejects(record(root, output), /payload inspected by threat detection/);
+    await completeSubmission(directory, output);
+    assert.deepEqual(JSON.parse(await readFile(output)).items[0].payload, JSON.parse(payload),
+        "Threat detection must inspect the actual payload, not merely its receipt.");
+    await record(root, output);
+    assert.deepEqual(JSON.parse(await readFile(path.join(root,
+        ".stale-reference-check/results/interpretations.json"))), JSON.parse(payload));
+});
+
+test("invalid candidates and blockers can be corrected but submission attempts are bounded", async t =>
+{
+    const root = await fixture(t);
+    const { batch } = await prepare({ repoRoot: root, logger });
+    const tools = await getSourceTools(path.join(root, ".stale-reference-check/input"));
+    const candidate = batch.candidates[0];
+    const payload = { schemaVersion: 1, results: [{
+        candidateId: candidate.id, status: "actionable", reason: "An issue blocks the test.",
+        actions: [{
+            kind: "ignore", anchor: "Example.Tests.SampleTests.Works",
+            testNames: ["Example.Tests.SampleTests.Works"],
+            startLine: candidate.seedLine, endLine: candidate.seedLine,
+            urls: ["https://github.com/dotnet/sdk/blob/main/src/Sample.cs"],
+        }],
+    }] };
+    await assert.rejects(tools.prepareInterpretations({ payload: JSON.stringify(payload) }),
+        /Candidate [a-f0-9]{64}: Action URL must identify.*2 attempts remaining/);
+    await assert.rejects(tools.prepareInterpretations({ payload: JSON.stringify({ schemaVersion: 1, results: [] }) }),
+        /exactly the expected candidate IDs.*1 attempts remaining/);
+    payload.results[0].actions[0].urls = ["https://github.com/dotnet/sdk/issues/123"];
+    assert.match((await tools.prepareInterpretations({ payload: JSON.stringify(payload) })).receipt, /^[a-f0-9]{64}$/);
+
+    const exhaustedRoot = await fixture(t);
+    await prepare({ repoRoot: exhaustedRoot, logger });
+    const exhausted = await getSourceTools(path.join(exhaustedRoot, ".stale-reference-check/input"));
+    for (let attempt = 0; attempt < 3; attempt++)
+    {
+        await assert.rejects(exhausted.prepareInterpretations({ payload: "{}" }),
+            new RegExp(`${2 - attempt} attempts remaining`));
+    }
+    await assert.rejects(exhausted.prepareInterpretations({ payload: JSON.stringify(payload) }), /budget is exhausted/);
+    assert.throws(() => exhausted.submission(), /No validated submission/);
+    await assert.rejects(readFile(path.join(exhaustedRoot, ".stale-reference-check/input/submission.json")),
+        { code: "ENOENT" });
+});
+
+test("receipts cannot authorize missing, altered, or unvalidated source results", async t =>
+{
+    const root = await fixture(t);
+    const { batch } = await prepare({ repoRoot: root, logger });
+    const directory = path.join(root, ".stale-reference-check/input");
+    const tools = await getSourceTools(directory);
+    const server = await startSourceServer(directory);
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const payload = { schemaVersion: 1, results: batch.candidates.map(candidate => ({
+        candidateId: candidate.id, status: "irrelevant", reason: "Fixture.", actions: [],
+    })) };
+    const output = path.join(root, "output.json");
+    await writeFile(output, JSON.stringify({ items: [{ type: "record_interpretations", receipt: "0".repeat(64) }] }));
+    await assert.rejects(completeSubmission(directory, output), /No validated submission/);
+    const accepted = await tools.prepareInterpretations({ payload: JSON.stringify(payload) });
+    await assert.rejects(completeSubmission(directory, output), /receipt does not match/);
+    await writeFile(output, JSON.stringify({ items: [{ type: "record_interpretations", ...accepted }] }));
+    await completeSubmission(directory, output);
+    const validOutput = await readFile(output, "utf8");
+    const altered = JSON.parse(validOutput);
+    altered.items[0].payload.results[0].reason = "Altered after acceptance.";
+    await writeFile(output, JSON.stringify(altered));
+    await assert.rejects(record(root, output), /payload inspected by threat detection/);
+    await writeFile(output, validOutput);
+    const submissionFile = path.join(directory, "submission.json");
+    const validSubmission = await readFile(submissionFile, "utf8");
+    const badSubmission = JSON.parse(validSubmission);
+    badSubmission.payload.results[0].candidateId = "0".repeat(64);
+    await writeFile(submissionFile, JSON.stringify(badSubmission));
+    await assert.rejects(record(root, output), /receipt does not match/);
+    // Even a matching receipt cannot replace committed-source validation.
+    badSubmission.receipt = submissionReceipt(badSubmission.payload);
+    await writeFile(submissionFile, JSON.stringify(badSubmission));
+    await writeFile(output, JSON.stringify({ items: [{
+        type: "record_interpretations", receipt: badSubmission.receipt, payload: badSubmission.payload,
+    }] }));
+    await assert.rejects(record(root, output), /Unknown, unexpected/);
+    await writeFile(submissionFile, validSubmission);
+    await writeFile(output, validOutput);
+    await writeFile(path.join(root, "src/Sample.cs"), "// Changed since collection\n");
+    await assert.rejects(record(root, output), /Source blob mismatch/);
+    await assert.rejects(readFile(path.join(root, ".stale-reference-check/results/interpretations.json")),
+        { code: "ENOENT" });
+});
+
+test("submission transport preserves large UTF-8 payloads and enforces size and concurrency limits", async t =>
+{
+    const root = await fixture(t);
+    const { batch } = await prepare({ repoRoot: root, logger });
+    const directory = path.join(root, ".stale-reference-check/input");
+    const server = await startSourceServer(directory);
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    await assert.rejects(requestSourceTools(directory, "prepare-interpretations",
+        { payload: " ".repeat(512 * 1024 + 1) }), /at most 512 KiB/);
+    const payload = JSON.stringify({ schemaVersion: 1, results: batch.candidates.map(candidate => ({
+        candidateId: candidate.id, status: "irrelevant", reason: "\u00e9".repeat(4000), actions: [],
+    })) });
+    assert.ok(Buffer.byteLength(payload) > 4096);
+    const tools = await getSourceTools(directory);
+    const pending = tools.prepareInterpretations({ payload });
+    await assert.rejects(tools.prepareInterpretations({ payload }), /being validated/);
+    await pending;
+    const accepted = await requestSourceTools(directory, "prepare-interpretations", { payload });
+    assert.equal(tools.submission().payload.results[0].reason, "\u00e9".repeat(4000));
+    assert.equal(accepted.receipt, submissionReceipt(JSON.parse(payload)));
+});
+
+test("packaged submission tools work in a separate process without a source checkout", async t =>
+{
+    const root = await fixture(t);
+    for (const file of ["source-tools.mjs", "interpretations.mjs", "collect.mjs"])
+    {
+        await writeFile(path.join(root, ".github/stale-reference-check", file),
+            await readFile(path.join(repository, ".github/stale-reference-check", file)));
+    }
+    const { batch } = await prepare({ repoRoot: root, logger });
+    const directory = await mkdtemp(path.join(os.tmpdir(), "stale-reference-private-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    await cp(path.join(root, ".stale-reference-check/input"), directory, { recursive: true });
+    const script = path.join(directory, "source-tools.mjs");
+    const payload = JSON.stringify({ schemaVersion: 1, results: batch.candidates.map(candidate => ({
+        candidateId: candidate.id, status: "irrelevant", reason: "Fixture.", actions: [],
+    })) });
+    const client = "const {getSourceTools}=await import(process.argv[1]);" +
+        "console.log(JSON.stringify(await (await getSourceTools(process.argv[2])).prepareInterpretations({payload:process.argv[3]})));";
+    const { stdout } = await promisify(execFile)(process.execPath,
+        ["--input-type=module", "-e", client, pathToFileURL(script).href, directory, payload], { cwd: directory });
+    assert.equal(JSON.parse(stdout).receipt, submissionReceipt(JSON.parse(payload)));
+});
+
 test("prepare creates a current-commit manifest and bounded batch without a cache", async (t) =>
 {
     const root = await fixture(t);
@@ -95,18 +266,15 @@ test("record validates all candidates and rejects duplicate safe-output calls", 
 {
     const root = await fixture(t);
     const { batch } = await prepare({ repoRoot: root, logger });
-    const item = {
-        type: "record_interpretations",
-        payload: JSON.stringify({
-            schemaVersion: 1,
-            results: batch.candidates.map(candidate => ({
-                candidateId: candidate.id,
-                status: "irrelevant",
-                reason: "Fixture classification.",
-                actions: [],
-            })),
-        }),
-    };
+    const item = await stageSubmission(root, {
+        schemaVersion: 1,
+        results: batch.candidates.map(candidate => ({
+            candidateId: candidate.id,
+            status: "irrelevant",
+            reason: "Fixture classification.",
+            actions: [],
+        })),
+    });
     const output = path.join(root, "output.json");
     process.env.GITHUB_STEP_SUMMARY = path.join(root, "summary.md");
     t.after(() => delete process.env.GITHUB_STEP_SUMMARY);
@@ -142,7 +310,7 @@ async function recordIrrelevantBatch(root, batch)
     };
     const output = path.join(root, "output.json");
     await writeFile(output, JSON.stringify({
-        items: [{ type: "record_interpretations", payload: JSON.stringify(payload) }],
+        items: [await stageSubmission(root, payload)],
     }));
     await record(root, output);
 }
@@ -203,29 +371,24 @@ test("expanded source evidence survives recording, separate jobs, and cached-onl
     const root = await fixture(t, 50);
     const { batch } = await prepare({ repoRoot: root, logger });
     const output = path.join(root, "output.json");
-    await writeFile(output, JSON.stringify({
-        items: [{
-            type: "record_interpretations",
-            payload: JSON.stringify({
-                schemaVersion: 1,
-                results: [{
-                    candidateId: batch.candidates[0].id,
-                    status: "actionable",
-                    reason: "The test is ignored pending this issue.",
-                    actions: [{
-                        kind: "ignore",
-                        anchor: "Example.Tests.SampleTests.Works",
-                        testNames: ["Example.Tests.SampleTests.Works"],
-                        startLine: batch.candidates[0].seedLine,
-                        endLine: batch.candidates[0].seedLine + 1,
-                        urls: ["https://github.com/dotnet/sdk/issues/123"],
-                        additionalConditions: [],
-                    }],
-                }],
-            }),
+    const payload = {
+        schemaVersion: 1,
+        results: [{
+            candidateId: batch.candidates[0].id,
+            status: "actionable",
+            reason: "The test is ignored pending this issue.",
+            actions: [{
+                kind: "ignore",
+                anchor: "Example.Tests.SampleTests.Works",
+                testNames: ["Example.Tests.SampleTests.Works"],
+                startLine: batch.candidates[0].seedLine,
+                endLine: batch.candidates[0].seedLine + 1,
+                urls: ["https://github.com/dotnet/sdk/issues/123"],
+                additionalConditions: [],
+            }],
         }],
-    }));
-    await assert.rejects(record(root, output), /namespace|qualified|context/i);
+    };
+    await assert.rejects(stageSubmission(root, payload), /namespace|qualified|context/i);
     const directory = path.join(root, ".stale-reference-check/input");
     const server = await startSourceServer(directory);
     try
@@ -239,6 +402,7 @@ test("expanded source evidence survives recording, separate jobs, and cached-onl
     {
         await new Promise(resolve => server.close(resolve));
     }
+    await writeFile(output, JSON.stringify({ items: [await stageSubmission(root, payload)] }));
     await record(root, output);
     await rm(path.join(directory, "context-evidence.json"));
     let resolved = false;
@@ -370,6 +534,11 @@ test("agent transport uses native bounded text tools rather than shell serializa
     assert.match(header, /bash: false/);
     assert.match(header, /read_batch:[\s\S]*?page:[\s\S]*?type: number/);
     assert.match(header, /read_context:[\s\S]*?candidateId:/);
+    assert.match(header, /prepare_interpretations:[\s\S]*?payload:[\s\S]*?type: string/);
+    assert.match(header, /return requestSourceTools\(directory, "prepare-interpretations", \{ payload \}\)/);
+    const recording = header.slice(header.indexOf("    record-interpretations:"));
+    assert.match(recording, /inputs:\s*\n\s*receipt:/);
+    assert.doesNotMatch(recording, /^\s+payload:/m);
     assert.match(header, /return formatContext\(await requestSourceTools/);
     assert.match(workflow, /Do not pass `schemaVersion` or `results` as top-level tool arguments/);
     assert.match(workflow, /Do not restate the analysis or calculate/);
@@ -391,6 +560,22 @@ test("agent transport uses native bounded text tools rather than shell serializa
     assert.ok(generated.includes(pinnedImage), "The compatible gateway image must be immutable.");
     const startGateway = generated.match(/      - name: Start MCP Gateway\r?\n([\s\S]*?)(?=^      - )/m)?.[1] ?? "";
     assert.ok(startGateway.includes(pinnedImage), "The executed gateway, not just its pre-pull, must use the fixed image.");
+});
+
+test("validated payloads reach threat detection before receipts authorize recording", async () =>
+{
+    const workflow = await readFile(path.join(workflowDirectory, "stale-reference-interpret.md"), "utf8");
+    assert.match(workflow, /at most three attempts total/);
+    assert.match(workflow, /complete "\$STALE_REFERENCE_PRIVATE" \/tmp\/gh-aw\/agent_output\.json/);
+    assert.match(workflow, /stale-reference-private\/submission\.json/);
+    const generated = await readFile(path.join(workflowDirectory, "stale-reference-interpret.lock.yml"), "utf8");
+    const collect = generated.indexOf("id: collect_output");
+    const expand = generated.indexOf('complete "$STALE_REFERENCE_PRIVATE" /tmp/gh-aw/agent_output.json');
+    const fallbackUpload = generated.indexOf("name: Upload agent output fallback artifact");
+    assert.ok(collect > 0 && expand > collect && fallbackUpload > expand,
+        "Receipt expansion must follow output collection and precede both detection input artifact uploads.");
+    const recordJob = generated.match(/^  record_interpretations:\r?\n([\s\S]*?)(?=^  \w+:\r?\n)/m)?.[1] ?? "";
+    assert.match(recordJob, /needs\.detection\.outputs\.detection_success == 'true'/);
 });
 
 test("helper CI verifies native gateway compatibility when container pins change", async () =>

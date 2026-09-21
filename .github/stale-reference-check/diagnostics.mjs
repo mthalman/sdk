@@ -300,6 +300,9 @@ function rpcUsage(chunks) {
             if (errors.some(text => text.includes(budgetMessage))) {
                 result.contextBudgetFailures++;
             }
+            if (errors.some(text => text.includes("Submission rejected:"))) {
+                result.rejectedOutputSubmissions++;
+            }
             contextBalance--;
             if (contextBalance < 0 || (!failed && !Object.hasOwn(payload, "result"))) {
                 contextIncomplete = true;
@@ -328,7 +331,7 @@ function rpcUsage(chunks) {
     if (contextIncomplete || contextBalance !== 0) {
         result.contextBudgetFailures = null;
     }
-    if (outputIncomplete || pendingOutputs.length > 0) {
+    if (contextIncomplete || contextBalance !== 0 || outputIncomplete || pendingOutputs.length > 0) {
         result.rejectedOutputSubmissions = null;
     }
     return result;

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { appendFile, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { collect } from "./collect.mjs";
+import { collect, readSource } from "./collect.mjs";
 import {
     getCachedResults,
     mergeCache,
@@ -10,7 +10,7 @@ import {
     validateInterpretations,
 } from "./interpretations.mjs";
 import { finalize } from "./finalize.mjs";
-import { formatContext, getSourceTools } from "./source-tools.mjs";
+import { formatContext, getSourceTools, submissionReceipt, verifySubmission } from "./source-tools.mjs";
 import { collectDiagnostics, formatDiagnostics } from "./diagnostics.mjs";
 
 const inputPath = (repoRoot) => path.resolve(repoRoot, process.env.STALE_REFERENCE_INPUT ?? ".stale-reference-check/input");
@@ -93,11 +93,11 @@ export async function prepare({ repoRoot, refreshCache = false, logger = console
     {
         if (!Object.hasOwn(sourceFiles, candidate.path))
         {
-            sourceFiles[candidate.path] = await readFile(path.join(repoRoot, candidate.path), "utf8");
+            sourceFiles[candidate.path] = (await readSource(repoRoot, candidate)).join("\n") + "\n";
         }
     }
     await writeJson(path.join(directory, "source-context.json"), sourceFiles);
-    for (const file of ["source-tools.mjs", "diagnostics.mjs"])
+    for (const file of ["source-tools.mjs", "diagnostics.mjs", "interpretations.mjs", "collect.mjs"])
     {
         await copyFile(path.join(repoRoot, ".github/stale-reference-check", file), path.join(directory, file));
     }
@@ -201,12 +201,17 @@ export async function record(repoRoot, outputFile)
         throw new Error("Safe output does not contain an items array.");
     }
     const items = output.items.filter(item => item.type === "record_interpretations");
-    if (items.length !== 1 || typeof items[0].payload !== "string" ||
-        Buffer.byteLength(items[0].payload, "utf8") > 512 * 1024)
+    if (items.length !== 1 || typeof items[0].receipt !== "string" || !/^[a-f0-9]{64}$/.test(items[0].receipt) ||
+        Object.keys(items[0]).some(key => !["type", "receipt", "payload"].includes(key)))
     {
-        throw new Error("Expected exactly one record_interpretations payload.");
+        throw new Error("Expected exactly one record_interpretations receipt.");
     }
-    const payload = JSON.parse(items[0].payload);
+    const submission = await readJson(path.join(inputPath(repoRoot), "submission.json"));
+    const payload = verifySubmission(submission, items[0].receipt);
+    if (!items[0].payload || submissionReceipt(items[0].payload) !== items[0].receipt)
+    {
+        throw new Error("The payload inspected by threat detection does not match the validated submission.");
+    }
     const contextEvidence = await readContextEvidence(path.join(inputPath(repoRoot), "context-evidence.json"));
     const validated = await validateInterpretations(payload, manifest, {
         repoRoot,
