@@ -551,7 +551,9 @@ test("fork driver serializes main-only runs and supports cached-only finalizatio
     assert.match(workflow, /group: stale-reference-check/);
     assert.match(workflow, /cancel-in-progress: false/);
     assert.match(workflow, /github\.repository == 'mthalman\/sdk' && github\.ref == 'refs\/heads\/main'/);
-    assert.match(workflow, /needs\.interpret\.result == 'success' \|\| needs\.interpret\.result == 'skipped'/);
+    assert.match(workflow, /needs\.collect\.outputs\.has_misses != 'true' \|\| needs\.interpret\.result == 'success'/);
+    assert.match(workflow, /if: needs\.interpret\.result == 'success'\r?\n        with:\r?\n          name: stale-reference-interpretations/);
+    assert.match(workflow, /if: needs\.interpret\.result == 'success'\r?\n        with:\r?\n          name: stale-reference-workflow-runtime/);
     assert.match(workflow, /inputs\.dry_run/);
     assert.match(workflow, /env\.DRY_RUN != 'true'/);
     assert.doesNotMatch(workflow, /pull_request:/);
