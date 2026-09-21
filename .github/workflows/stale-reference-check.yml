@@ -1,8 +1,6 @@
 name: Check potentially stale references
 
 on:
-  schedule:
-    - cron: '23 7 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -26,7 +24,7 @@ env:
 
 jobs:
   collect:
-    if: github.event.repository.fork == false && github.ref == 'refs/heads/main'
+    if: github.repository == 'mthalman/sdk' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       has_misses: ${{ steps.collect.outputs.has_misses }}
@@ -60,7 +58,7 @@ jobs:
 
   interpret:
     needs: collect
-    if: needs.collect.outputs.has_misses == 'true'
+    if: github.repository == 'mthalman/sdk' && github.ref == 'refs/heads/main' && needs.collect.outputs.has_misses == 'true'
     permissions:
       # The compiler declares this for its disabled conclusion job. Executing
       # interpreter jobs explicitly retain read-only Actions permissions and
@@ -88,6 +86,7 @@ jobs:
     needs: [collect, interpret]
     if: >-
       always() && !cancelled() &&
+      github.repository == 'mthalman/sdk' && github.ref == 'refs/heads/main' &&
       needs.collect.result == 'success' &&
       (needs.interpret.result == 'success' || needs.interpret.result == 'skipped')
     runs-on: ubuntu-latest
@@ -124,10 +123,11 @@ jobs:
           script: |
             const { pathToFileURL } = require('node:url');
             const path = require('node:path');
-            const { finish } = await import(pathToFileURL(path.resolve('.github/stale-reference-check/workflow.mjs')));
-            await finish({
+            const { finishFork } = await import(pathToFileURL(path.resolve('.github/stale-reference-check/fork-only.mjs')));
+            await finishFork({
               github,
               repository: `${context.repo.owner}/${context.repo.repo}`,
+              ref: context.ref,
               repoRoot: process.env.GITHUB_WORKSPACE,
               dryRun: process.env.DRY_RUN === 'true',
               logger: core,
