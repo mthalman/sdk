@@ -11,7 +11,7 @@ import {
 } from "./interpretations.mjs";
 import { finalize } from "./finalize.mjs";
 import { formatContext, getSourceTools, submissionReceipt, verifySubmission } from "./source-tools.mjs";
-import { collectDiagnostics, formatDiagnostics } from "./diagnostics.mjs";
+import { collectDiagnostics, formatDiagnostics, formatWorkflowDiagnostics } from "./diagnostics.mjs";
 
 const inputPath = (repoRoot) => path.resolve(repoRoot, process.env.STALE_REFERENCE_INPUT ?? ".stale-reference-check/input");
 const statePath = (repoRoot) => path.join(repoRoot, ".stale-reference-check/state/cache.json");
@@ -293,6 +293,9 @@ export async function finish({ github, repository, repoRoot, dryRun, logger = co
     const runtimeText = batch.candidates.length
         ? await readOptional(path.join(path.dirname(resultsPath(repoRoot)), "runtime.json")) : null;
     const runtime = runtimeText === null ? null : JSON.parse(runtimeText);
+    const workflowRuntimeText = batch.candidates.length
+        ? await readOptional(path.join(path.dirname(resultsPath(repoRoot)), "workflow-runtime.json")) : null;
+    const workflowRuntime = workflowRuntimeText === null ? null : JSON.parse(workflowRuntimeText);
     try
     {
         const report = await finalize({ github, repository, headSha: manifest.headSha, actions, dryRun, logger });
@@ -307,6 +310,15 @@ export async function finish({ github, repository, repoRoot, dryRun, logger = co
             batch: interpretationCounts(fresh),
         };
         report.runtime = runtime;
+        report.workflowRuntime = workflowRuntime;
+        if (workflowRuntime)
+        {
+            report.diagnostics.push(...workflowRuntime.diagnostics.map(diagnostic => ({ type: "workflow-runtime", ...diagnostic })));
+        }
+        else if (batch.candidates.length)
+        {
+            report.diagnostics.push({ type: "workflow-runtime", message: "Combined interpreter and detection usage is unavailable for this batch." });
+        }
         if (runtime)
         {
             report.diagnostics.push(...runtime.diagnostics.map(diagnostic => ({ type: "agent-runtime", ...diagnostic })));
@@ -324,13 +336,14 @@ export async function finish({ github, repository, repoRoot, dryRun, logger = co
                 `Validated this batch: ${report.interpretations.batch.actionable} actionable; ` +
                 `${report.interpretations.batch.irrelevant} irrelevant; ${report.interpretations.batch.deferred} deferred.\n\n` +
                 `Remaining interpretations: ${report.interpretations.remaining}. See the decision-report artifact for details.\n` +
+                (workflowRuntime ? `\n${formatWorkflowDiagnostics(workflowRuntime)}` : "") +
                 (runtime ? `\n${formatDiagnostics(runtime)}` : ""));
         }
         return report;
     }
     catch (error)
     {
-        await writeJson(reportFile, { failed: true, error: error.message, dryRun, runtime });
+        await writeJson(reportFile, { failed: true, error: error.message, dryRun, runtime, workflowRuntime });
         throw error;
     }
 }

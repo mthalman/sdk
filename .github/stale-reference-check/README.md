@@ -77,13 +77,18 @@ deferred. Data rows do not create separate tracking issues.
 The interpreter uses native MCP calls, not shell-based CLI proxies. Bash and
 file editing are disabled; it has no source checkout, general-purpose Node
 execution, or GitHub tools. Native tool schemas define the input arguments,
-including the single JSON-string `payload` for `prepare_interpretations`, so the
-agent never needs temporary files or shell pipelines to submit its results.
-That tool parses and validates the entire batch synchronously, using the same
+including the object-valued `payload` for `prepare_interpretations`. The agent
+passes the object directly; trusted MCP script code serializes it once for the
+private host service. This avoids generating escaped JSON inside another JSON
+document, without repairing malformed submissions or weakening validation.
+The agent never needs temporary files or shell pipelines to submit its results.
+That tool validates the entire batch synchronously, using the same
 [`interpretations.mjs`](interpretations.mjs) checks as the recording job. Invalid
-JSON, missing candidates, unsupported URLs, and unsupported source claims return
+shapes, missing candidates, unsupported URLs, and unsupported source claims return
 errors while the agent is still running. The host permits three submission
-attempts, with no automatic JSON repair or partial acceptance.
+attempts and a 512 KiB serialized-payload limit, with no partial acceptance.
+The native schema declares an object; the host validator, not that type
+declaration alone, enforces the complete nested result contract.
 
 An accepted payload is frozen in the private host process. The tool returns a
 SHA-256 receipt; the agent calls `record_interpretations` once with that receipt
@@ -231,14 +236,36 @@ An always-run agent post-step also publishes `runtime.json` in
 failures do not depend on successful output recording for diagnostics. The
 recording job recomputes metrics from the complete downloaded agent artifact.
 
-[`diagnostics.mjs`](diagnostics.mjs) summarizes the downloaded agent traces:
+These `runtime.json` artifacts and the decision report's `runtime` field cover
+the **interpreter only**, not threat detection.
+A separate read-only `runtime_diagnostics` job waits for the interpreter and
+detector, including failures, without depending on successful recording. It
+downloads their current-run artifacts into separate directories and publishes
+`workflow-runtime.json` as `stale-reference-workflow-runtime-<input-artifact-id>`.
+It runs no model and changes no detection or filing gates. Successful
+finalization includes this report in `workflowRuntime` and the job summary.
+
+[`diagnostics.mjs`](diagnostics.mjs) summarizes the downloaded traces:
 request count, models, summed request duration, token/cache usage, AI credits,
 permission-denial occurrences, context-budget failures, and rejected submissions.
+The workflow usage table separates interpreter and detector requests and reports
+their combined usage. It does not add `agent_usage.json` totals to request
+totals a second time. Both stages must have usable request logs for a combined
+total; missing or skipped detector traces are not assumed to cost zero.
+Detector metrics require only its token-usage logs, not interpreter-only MCP or
+CLI artifacts. Token fields retain each provider's accounting semantics, and
+summed model-request duration is not workflow wall time.
 Runtime warnings appear in the decision report and job summaries. Missing,
 malformed, or oversized traces produce explicit unavailable metrics, not zeroes.
 Model prompt-cache tokens are unrelated to the persistent interpretation cache.
 These metrics are observational and never authorize filing; cached-only runs do
 not reuse a previous batch's runtime diagnostics.
+
+To summarize separately downloaded interpreter and detection artifacts locally:
+
+```powershell
+node .github\stale-reference-check\diagnostics.mjs --workflow .\agent .\detection .\workflow-runtime.json
+```
 
 A failure is explicit,
 not a successful empty result. API failures do not establish that a blocker was

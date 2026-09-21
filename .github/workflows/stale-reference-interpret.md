@@ -37,6 +37,49 @@ jobs:
       needs.agent.result != 'success' ||
       needs.detection.outputs.detection_success != 'true' ||
       needs.agent.outputs.output_types != 'record_interpretations'
+  runtime_diagnostics:
+    needs: [activation, agent, detection]
+    if: always() && !cancelled() && needs.activation.result == 'success'
+    runs-on: ubuntu-slim
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.input_artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/stale-reference-private
+      - name: Download separate interpreter and detection traces
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "{${{ needs.activation.outputs.artifact_prefix }}agent,${{ needs.activation.outputs.artifact_prefix }}detection}"
+          merge-multiple: false
+          path: ${{ runner.temp }}/stale-reference-runtime
+      - name: Summarize complete workflow model usage
+        if: always()
+        env:
+          STALE_REFERENCE_PRIVATE: ${{ runner.temp }}/stale-reference-private
+          RUNTIME_DIRECTORY: ${{ runner.temp }}/stale-reference-runtime
+          ARTIFACT_PREFIX: ${{ needs.activation.outputs.artifact_prefix }}
+        run: |
+          mkdir -p "$RUNTIME_DIRECTORY"
+          node "$STALE_REFERENCE_PRIVATE/diagnostics.mjs" --workflow \
+            "$RUNTIME_DIRECTORY/${ARTIFACT_PREFIX}agent" \
+            "$RUNTIME_DIRECTORY/${ARTIFACT_PREFIX}detection" \
+            "$RUNTIME_DIRECTORY/workflow-runtime.json"
+      - name: Upload complete workflow usage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stale-reference-workflow-runtime-${{ inputs.input_artifact_id }}
+          path: ${{ runner.temp }}/stale-reference-runtime/workflow-runtime.json
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 7
 
 imports:
   - uses: shared/pat_pool.md
@@ -146,10 +189,10 @@ mcp-scripts:
       const { formatContext, requestSourceTools } = await import(pathToFileURL(join(directory, "source-tools.mjs")).href);
       return formatContext(await requestSourceTools(directory, "read-context", { candidateId, startLine, endLine }));
   prepare_interpretations:
-    description: Validate the complete batch now against trusted source. Pass a serialized JSON payload string, at most 512 KiB. Invalid submissions return an error you can correct; at most three attempts. Success freezes the payload and returns its receipt for record_interpretations.
+    description: Validate the complete batch now against trusted source. Pass payload as a JSON object, not a string, at most 512 KiB when serialized. Invalid submissions return an error you can correct; at most three attempts. Success freezes the payload and returns its receipt for record_interpretations.
     inputs:
       payload:
-        type: string
+        type: object
         required: true
     env:
       STALE_REFERENCE_PRIVATE: ${{ runner.temp }}/stale-reference-private
@@ -158,7 +201,7 @@ mcp-scripts:
       const { join } = await import("node:path");
       const directory = process.env.STALE_REFERENCE_PRIVATE;
       const { requestSourceTools } = await import(pathToFileURL(join(directory, "source-tools.mjs")).href);
-      return requestSourceTools(directory, "prepare-interpretations", { payload });
+      return requestSourceTools(directory, "prepare-interpretations", { payload: JSON.stringify(payload) });
 
 safe-outputs:
   threat-detection:
@@ -306,16 +349,17 @@ forms above. A single unsupported URL rejects the entire batch; a relevant
 source-code link belongs in neither the blocker list nor a separate action.
 
 Call the native `prepare_interpretations` tool with one argument,
-`payload`. Its value is a **string containing serialized JSON**, not an object.
+`payload`. Its value is a **JSON object**, not a string containing JSON.
 For example, a one-candidate irrelevant result uses this argument shape:
 
 ```json
-{"payload":"{\"schemaVersion\":1,\"results\":[{\"candidateId\":\"the supplied ID\",\"status\":\"irrelevant\",\"reason\":\"No remaining work is expressed by this source.\",\"actions\":[]}]}"}
+{"payload":{"schemaVersion":1,"results":[{"candidateId":"the supplied ID","status":"irrelevant","reason":"No remaining work is expressed by this source.","actions":[]}]}}
 ```
 
 Do not pass `schemaVersion` or `results` as top-level tool arguments. Do not
-use shell commands or files to construct the string. The JSON inside `payload`
-has this structure:
+serialize or escape the object yourself, or use shell commands or files to
+construct it. Trusted tool code handles serialization. The `payload` object has
+this structure:
 
 ```json
 {
@@ -359,7 +403,7 @@ Do not supply issue prose, labels, repository destinations, paths, hashes,
 remote state, or arbitrary additional fields. Even if every candidate is
 irrelevant, record the complete batch rather than returning a bare noop.
 
-`prepare_interpretations` parses the JSON and validates every result against
+`prepare_interpretations` validates every result against
 trusted source before accepting it. On rejection, correct the reported problem
 and resubmit the complete batch. There are at most three attempts total; do not
 send parallel submissions. If the budget is exhausted, report `missing_data`
