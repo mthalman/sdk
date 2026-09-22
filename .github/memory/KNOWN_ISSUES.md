@@ -78,20 +78,22 @@ promote only intentional output to `*.verified.*`. See the
 [root generated-file guardrails](../../AGENTS.md#do-not-hand-edit-generated-files)
 and [`snapshot-based-testing.md`](../../documentation/project-docs/snapshot-based-testing.md).
 
-## Copilot CLI 1.0.85 Can Reject Initial Agent Requests
+## Copilot CLI 1.0.83+ Can Reject Initial Agent Requests
 
 **Affected area:** gh-aw workflows using the Copilot engine
 
-**Description:** Copilot CLI 1.0.85 can return an immediate, zero-token HTTP 400
-from `/responses` before agent work or MCP tool calls begin. The gh-aw upstream
-reverted its default to 1.0.83 in
+**Description:** Copilot CLI 1.0.83 and 1.0.85 can return an immediate, zero-token
+HTTP 400 from `/responses` before agent work or MCP tool calls begin. In particular,
+the `gpt-5.6-*` model family deterministically fails with CLI 1.0.83, as tracked by
+[github/gh-aw#60820](https://github.com/github/gh-aw/issues/60820). The gh-aw
+upstream reverted its default from 1.0.85 to 1.0.83 in
 [github/gh-aw#62421](https://github.com/github/gh-aw/pull/62421), which resolves
-[github/gh-aw#62363](https://github.com/github/gh-aw/issues/62363), but the fix
-was not yet released with gh-aw v0.89.17.
+[github/gh-aw#62363](https://github.com/github/gh-aw/issues/62363), but does not
+resolve the 1.0.83 model regression.
 
-**Workaround:** Set `engine.version: 1.0.83` in affected workflow source and
+**Workaround:** Set `engine.version: 1.0.80` in affected workflow source and
 regenerate the `.lock.yml` with its pinned compiler. Remove the explicit pin only
-after upgrading to a release that includes the upstream fix.
+after upgrading to a release that fixes both regressions.
 
 ## Redist Requires Correct Outer-Build Ordering
 

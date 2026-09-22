@@ -133,9 +133,9 @@ environment: copilot-pat-pool
 engine:
   id: copilot
   model: gpt-5.6-luna
-  # Work around Copilot CLI 1.0.85 rejecting its first /responses request;
-  # remove after a released gh-aw version includes github/gh-aw#62363's fix.
-  version: 1.0.83
+  # Work around persistent first-request HTTP 400 failures for gpt-5.6-* in
+  # Copilot CLI 1.0.83 and 1.0.85; see github/gh-aw#60820 and #62363.
+  version: 1.0.80
   env:
     COPILOT_GITHUB_TOKEN: ${{ case(needs.pat_pool.outputs.pat_number == '0', secrets.COPILOT_PAT_0, needs.pat_pool.outputs.pat_number == '1', secrets.COPILOT_PAT_1, needs.pat_pool.outputs.pat_number == '2', secrets.COPILOT_PAT_2, needs.pat_pool.outputs.pat_number == '3', secrets.COPILOT_PAT_3, needs.pat_pool.outputs.pat_number == '4', secrets.COPILOT_PAT_4, needs.pat_pool.outputs.pat_number == '5', secrets.COPILOT_PAT_5, needs.pat_pool.outputs.pat_number == '6', secrets.COPILOT_PAT_6, needs.pat_pool.outputs.pat_number == '7', secrets.COPILOT_PAT_7, needs.pat_pool.outputs.pat_number == '8', secrets.COPILOT_PAT_8, needs.pat_pool.outputs.pat_number == '9', secrets.COPILOT_PAT_9, 'NO COPILOT PAT AVAILABLE') }}
 

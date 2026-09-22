@@ -115,11 +115,12 @@ The gh-aw v0.89.17 compiler defaults to MCP gateway v0.4.25, which the protocol
 smoke test validates for native clients' stateful fallback initialization. Strict
 mode, sandboxing, and permissions remain unchanged. The generated lock pins that
 compiler-selected image to an immutable digest.
-The workflow explicitly pins Copilot CLI 1.0.83 because 1.0.85 can reject the
-first `/responses` request with an HTTP 400 before any model or MCP work begins;
-see [github/gh-aw#62363](https://github.com/github/gh-aw/issues/62363). Remove
-this temporary engine pin only after upgrading to a released gh-aw version that
-includes the upstream fix.
+The workflow explicitly pins Copilot CLI 1.0.80 because `gpt-5.6-*` models can
+reject the first `/responses` request with an HTTP 400 in CLI 1.0.83 and 1.0.85,
+before any model or MCP work begins; see
+[github/gh-aw#60820](https://github.com/github/gh-aw/issues/60820) and
+[github/gh-aw#62363](https://github.com/github/gh-aw/issues/62363). Remove this
+temporary engine pin only after upgrading to a release that fixes both regressions.
 
 The interpreter pins `gpt-5.6-luna` and permits at most 64 agent turns and
 150 AI credits, retaining the 20-minute agent-execution timeout. The generated
