@@ -94,8 +94,7 @@ export async function readSource(repoRoot, candidate) {
 }
 
 function ownedSource(filePath) {
-    return filePath.startsWith('src/ForkStaleReferenceScenarios/')
-        && (sourceExtension.test(filePath) || /(^|\/)(Dockerfile(?:\.[^/]+)?|Makefile|CMakeLists\.txt)$/i.test(filePath))
+    return (sourceExtension.test(filePath) || /(^|\/)(Dockerfile(?:\.[^/]+)?|Makefile|CMakeLists\.txt)$/i.test(filePath))
         && !excludedDirectory.test(filePath)
         && !/^\.github\/stale-reference-check\/test\//i.test(filePath)
         && !/^eng\/common\//i.test(filePath)
