@@ -26,7 +26,7 @@ env:
 
 jobs:
   collect:
-    if: github.repository == 'dotnet/sdk' && github.ref == 'refs/heads/main'
+    if: github.repository == 'mthalman/sdk' && github.ref == 'refs/heads/mthalman-stale-reference-check-fork-test'
     runs-on: ubuntu-latest
     outputs:
       has_misses: ${{ steps.collect.outputs.has_misses }}
@@ -60,7 +60,7 @@ jobs:
 
   interpret:
     needs: collect
-    if: github.repository == 'dotnet/sdk' && github.ref == 'refs/heads/main' && needs.collect.outputs.has_misses == 'true'
+    if: github.repository == 'mthalman/sdk' && github.ref == 'refs/heads/mthalman-stale-reference-check-fork-test' && needs.collect.outputs.has_misses == 'true'
     permissions:
       # The compiler declares this for its disabled conclusion job. Executing
       # interpreter jobs explicitly retain read-only Actions permissions.
@@ -86,7 +86,7 @@ jobs:
     needs: [collect, interpret]
     if: >-
       always() && !cancelled() &&
-      github.repository == 'dotnet/sdk' && github.ref == 'refs/heads/main' &&
+      github.repository == 'mthalman/sdk' && github.ref == 'refs/heads/mthalman-stale-reference-check-fork-test' &&
       needs.collect.result == 'success' &&
       (needs.collect.outputs.has_misses != 'true' || needs.interpret.result == 'success')
     runs-on: ubuntu-latest

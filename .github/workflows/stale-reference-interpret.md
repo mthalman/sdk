@@ -12,7 +12,7 @@ on:
     - name: Initialize source interpretation
       run: echo "Interpreting a bounded batch of source references." >> "$GITHUB_STEP_SUMMARY"
 
-if: github.repository == 'dotnet/sdk' && github.ref == 'refs/heads/main'
+if: github.repository == 'mthalman/sdk' && github.ref == 'refs/heads/mthalman-stale-reference-check-fork-test'
 
 permissions:
   actions: read
