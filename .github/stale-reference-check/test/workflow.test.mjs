@@ -500,12 +500,12 @@ test("host-side source tools expose only the batch and enforce shared expansion 
     assert.throws(() => tools.readContext(request), /budget is exhausted/);
 });
 
-test("driver serializes main-only runs and supports cached-only finalization", async () =>
+test("driver serializes fork-test runs and supports cached-only finalization", async () =>
 {
     const workflow = await readFile(path.join(workflowDirectory, "stale-reference-check.yml"), "utf8");
     assert.match(workflow, /group: stale-reference-check/);
     assert.match(workflow, /cancel-in-progress: false/);
-    assert.match(workflow, /github\.repository == 'dotnet\/sdk' && github\.ref == 'refs\/heads\/main'/);
+    assert.match(workflow, /github\.repository == 'mthalman\/sdk' && github\.ref == 'refs\/heads\/mthalman-stale-reference-check-fork-test'/);
     assert.match(workflow, /needs\.collect\.outputs\.has_misses != 'true' \|\| needs\.interpret\.result == 'success'/);
     assert.match(workflow, /if: needs\.interpret\.result == 'success'\r?\n        with:\r?\n          name: stale-reference-interpretations/);
     assert.match(workflow, /inputs\.dry_run/);
