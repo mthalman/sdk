@@ -13,10 +13,4 @@ public static class Cases
         // TODO: Remove this fallback after https://github.com/mthalman/sdk/issues/27 is fixed, the fixed dependency version is consumed, and compatibility is verified.
         return "compatibility fallback";
     }
-
-    public static string E()
-    {
-        // TODO: Remove this fallback when https://github.com/mthalman/sdk/issues/26 is fixed.
-        return "temporary fallback";
-    }
 }
