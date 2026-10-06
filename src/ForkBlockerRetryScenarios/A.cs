@@ -10,9 +10,4 @@ public static class InitialSites
         return "temporary fallback";
     }
 
-    public static string Fifth()
-    {
-        // TODO: Remove this temporary fallback after https://github.com/mthalman/sdk/issues/35 is fixed.
-        return "temporary fallback";
-    }
 }
