@@ -10,4 +10,15 @@ public static class InitialSites
         return "temporary fallback";
     }
 
+    public static string SeparateA()
+    {
+        // TODO: Remove this temporary fallback after https://github.com/mthalman/sdk/issues/35 is fixed.
+        return "temporary fallback";
+    }
+
+    public static string SeparateB()
+    {
+        // TODO: Remove this temporary fallback after https://github.com/mthalman/sdk/issues/36 is fixed.
+        return "temporary fallback";
+    }
 }
