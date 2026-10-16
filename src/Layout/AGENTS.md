@@ -52,6 +52,20 @@ completion before mutating the chain, and write it only after generation succeed
 Production-target coverage is in
 [`SdkMetadataTests`](../../test/sdk-tasks.Tests/SdkMetadataTests.cs).
 
+JSON finalization must compare the completed result before replacing a published file.
+For package runtimeconfigs, copying raw JSON over a retargeted destination defeats
+unchanged-file copying; finalize from the original source directly instead.
+[`PublishMutationUtilities`](../Tasks/sdk-tasks/PublishMutationUtilities.cs) shares
+the byte-stable atomic writer used by the JSON tasks.
+
+F# child publishing retains its raw `tool_fsc` inputs under
+`IntermediateOutputPath/fsharp-publish`; those inputs must not be mutated or deleted
+by shipping-layout finalization. Only the real compiler payload and finalized
+`fsc`/`fsi` config/deps files belong in the SDK. `RetargetTools` remains a correctness
+sweep, including legacy `15.0` relocation and the testhost runtimeconfig exclusion.
+Production-target coverage is in
+[`SdkJsonLayoutTests`](../../test/sdk-tasks.Tests/SdkJsonLayoutTests.cs).
+
 ### Workload manifest layout ownership
 
 [`LayoutManifests`](redist/targets/BundledManifests.targets) may only delete the
