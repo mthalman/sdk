@@ -22,7 +22,8 @@ public class SdkAppHostTests : SdkTest
 {
     /// <summary>
     /// Verifies unchanged invocations skip native apphost creation without rewriting
-    /// binaries, while newly introduced Roslyn payload files are still copied.
+    /// binaries, newly introduced Roslyn payload files are still copied, and changing
+    /// the selected compiler package invalidates only its apphosts.
     /// </summary>
     [TestMethod]
     public void WarmBuildsSkipGenerationWithoutSkippingPayloadCopying()
@@ -46,6 +47,23 @@ public class SdkAppHostTests : SdkTest
         {
             File.ReadAllBytes(path).Should().Equal(bytes);
         }
+
+        string alternatePackage = project.RoslynPackageDirectoryAt("2.0.0");
+        foreach (string name in new[] { "csc", "vbc", "VBCSCompiler" })
+        {
+            string source = Path.Combine(project.RoslynPackageDirectory, name + ".dll");
+            string destination = Path.Combine(alternatePackage, name + ".dll");
+            Copy(source, destination);
+            File.SetLastWriteTimeUtc(destination, DateTime.UnixEpoch);
+        }
+
+        Dictionary<string, string> properties = new()
+        {
+            ["MicrosoftNetCompilersToolsetVersion"] = "2.0.0"
+        };
+        project.Build(properties).CreatedHosts.Should().Be(3);
+        AssertTimestamps(timestamps.Where(pair => Path.GetFileName(pair.Key) == "MSBuild" + AppHostProject.Extension)
+            .ToDictionary(pair => pair.Key, pair => pair.Value));
     }
 
     /// <summary>
@@ -96,32 +114,6 @@ public class SdkAppHostTests : SdkTest
         project.Build().CreatedHosts.Should().Be(1);
         project.Build().CreatedHosts.Should().Be(0);
         AssertTimestamps(siblings);
-    }
-
-    /// <summary>
-    /// Verifies changing the selected Roslyn package invalidates compiler apphosts
-    /// even when the replacement package files have older timestamps.
-    /// </summary>
-    [TestMethod]
-    public void ChangingRoslynPackageInvalidatesCompilerAppHosts()
-    {
-        AppHostProject project = CreateProject();
-        project.Build();
-        string alternatePackage = project.RoslynPackageDirectoryAt("2.0.0");
-        foreach (string name in new[] { "csc", "vbc", "VBCSCompiler" })
-        {
-            string source = Path.Combine(project.RoslynPackageDirectory, name + ".dll");
-            string destination = Path.Combine(alternatePackage, name + ".dll");
-            Copy(source, destination);
-            File.SetLastWriteTimeUtc(destination, DateTime.UnixEpoch);
-        }
-
-        Dictionary<string, string> properties = new()
-        {
-            ["MicrosoftNetCompilersToolsetVersion"] = "2.0.0"
-        };
-        project.Build(properties).CreatedHosts.Should().Be(3);
-        project.Build(properties).CreatedHosts.Should().Be(0);
     }
 
     /// <summary>
