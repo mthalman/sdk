@@ -36,6 +36,22 @@ Two families of targets:
 - Producing the laid-out SDK requires the **full repo build** (so the components exist
   to copy), not just this project — see the root build/dogfood instructions.
 
+### SDK staging incrementality
+
+[`GenerateSdkLayout`](redist/targets/GenerateLayout.targets) remains an orchestrator.
+The producers in
+[`GenerateBundledVersions.targets`](redist/targets/GenerateBundledVersions.targets)
+also populate properties and items needed by consumers; preserve that preparation even
+when their content-stable writes leave the generated files untouched.
+
+RID-chain generation tracks its RID, package mapping, and implementation inputs.
+Its completion stamp records successful processing separately from the published
+chain's timestamp, because a changed graph can produce identical chain bytes.
+Record property and mapping changes in content-stable timestamp inputs. Remove
+completion before mutating the chain, and write it only after generation succeeds.
+Production-target coverage is in
+[`SdkMetadataTests`](../../test/sdk-tasks.Tests/SdkMetadataTests.cs).
+
 ### Workload manifest layout ownership
 
 [`LayoutManifests`](redist/targets/BundledManifests.targets) may only delete the

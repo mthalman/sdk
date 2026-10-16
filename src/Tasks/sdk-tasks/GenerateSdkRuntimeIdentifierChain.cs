@@ -3,6 +3,7 @@
 
 #nullable disable
 
+using System.Text;
 using NuGet.RuntimeModel;
 
 namespace Microsoft.DotNet.Build.Tasks
@@ -23,7 +24,11 @@ namespace Microsoft.DotNet.Build.Tasks
             var runtimeIdentifierGraph = JsonRuntimeFormat.ReadRuntimeGraph(RuntimeIdentifierGraphPath);
 
             var chainContents = string.Join("\n", runtimeIdentifierGraph.ExpandRuntime(RuntimeIdentifier));
-            File.WriteAllText(RuntimeIdentifierChainOutputPath, chainContents);
+            if (!File.Exists(RuntimeIdentifierChainOutputPath) ||
+                !File.ReadAllBytes(RuntimeIdentifierChainOutputPath).AsSpan().SequenceEqual(Encoding.UTF8.GetBytes(chainContents)))
+            {
+                IncrementalLayoutState.WriteFile(RuntimeIdentifierChainOutputPath, chainContents);
+            }
 
             return true;
         }
