@@ -104,22 +104,21 @@ public class SdkJsonLayoutTests : SdkTest
     }
 
     /// <summary>
-    /// Verifies content edits and reverts at each raw-input boundary produce the same JSON
+    /// Verifies deps edits and reverts produce the same JSON
     /// as clean finalization and stabilize on subsequent unchanged invocations.
     /// </summary>
     [TestMethod]
-    [DataRow("deps")]
-    public void InputEditsAndRevertsMatchCleanFinalization(string input)
+    public void DepsEditsAndRevertsMatchCleanFinalization()
     {
         JsonProject project = CreateProject();
         project.Build();
         Dictionary<string, byte[]> original = Contents(project.JsonFiles);
-        project.EditInput(input, changed: true);
+        project.EditDepsInput(changed: true);
         project.Build();
         project.JsonFiles.Any(path => !File.ReadAllBytes(path).SequenceEqual(original[path])).Should().BeTrue();
 
         JsonProject clean = CreateProject();
-        clean.EditInput(input, changed: true);
+        clean.EditDepsInput(changed: true);
         clean.Build();
         foreach (string path in project.JsonFiles)
         {
@@ -129,7 +128,7 @@ public class SdkJsonLayoutTests : SdkTest
         project.Build();
         AssertTimestamps(changed);
 
-        project.EditInput(input, changed: false);
+        project.EditDepsInput(changed: false);
         project.Build();
         AssertContents(original);
     }
@@ -223,34 +222,26 @@ public class SdkJsonLayoutTests : SdkTest
     private sealed class JsonProject
     {
         private readonly string _project;
-        private readonly Dictionary<string, string> _originalInputs = [];
+        private readonly string _originalDeps;
 
         public JsonProject(string root)
         {
             Root = root;
             PrepareOutput(OutputDirectory);
-            Inputs["deps"] = [Output("redist.deps.json")];
-            Inputs["runtime"] = [Output("redist.runtimeconfig.json")];
+            _originalDeps = File.ReadAllText(Output("redist.deps.json"));
             string packages = Path.Combine(root, "packages");
             string roslyn = Path.Combine(packages, "microsoft.net.compilers.toolset", "1.0.0", "tasks", "netcore", "bincore");
             string testCli = Path.Combine(packages, "microsoft.testplatform.cli", "1.0.0", "contentFiles", "any", "net10.0");
             string format = Path.Combine(root, "bin", "dotnet-format", "Debug", "test-framework");
-            Inputs["package-runtime"] =
-            [
-                Write(Path.Combine(roslyn, "csc.runtimeconfig.json"), RuntimeConfig),
-                Write(Path.Combine(testCli, "vstest.console.runtimeconfig.json"), RuntimeConfig),
-                Write(Path.Combine(format, "BuildHost-netcore", "BuildHost.runtimeconfig.json"), RuntimeConfig)
-            ];
+            Write(Path.Combine(roslyn, "csc.runtimeconfig.json"), RuntimeConfig);
+            Write(Path.Combine(testCli, "vstest.console.runtimeconfig.json"), RuntimeConfig);
+            Write(Path.Combine(format, "BuildHost-netcore", "BuildHost.runtimeconfig.json"), RuntimeConfig);
             Write(Path.Combine(testCli, "testhost-latest.runtimeconfig.json"), RuntimeConfig);
             Write(FSharpInput("tool_fsc.dll"), "synthetic");
             Write(FSharpInput("tool_fsc.pdb"), "symbols");
             Write(FSharpInput("payload.dll"), "payload");
-            Inputs["fsharp-runtime"] = [Write(FSharpInput("tool_fsc.runtimeconfig.json"), RuntimeConfig)];
-            Inputs["fsharp-deps"] = [Write(FSharpInput("tool_fsc.deps.json"), Deps.Replace("redist", "tool_fsc"))];
-            foreach (string input in Inputs.Values.SelectMany(paths => paths))
-            {
-                _originalInputs[input] = File.ReadAllText(input);
-            }
+            Write(FSharpInput("tool_fsc.runtimeconfig.json"), RuntimeConfig);
+            Write(FSharpInput("tool_fsc.deps.json"), Deps.Replace("redist", "tool_fsc"));
 
             string assembly = typeof(UpdateRuntimeConfig).Assembly.Location;
             string builtIn = Path.Combine(Path.GetDirectoryName(typeof(Project).Assembly.Location)!, "Microsoft.Build.Tasks.Core.dll");
@@ -300,7 +291,6 @@ public class SdkJsonLayoutTests : SdkTest
         public string Root { get; }
         public string OutputDirectory => Path.Combine(Root, "out");
         public string[] JsonFiles => Directory.GetFiles(OutputDirectory, "*.json", SearchOption.AllDirectories);
-        public Dictionary<string, string[]> Inputs { get; } = [];
         public string Output(params string[] parts) => Path.Combine([OutputDirectory, .. parts]);
         public string FSharpInput(string name) => Path.Combine(Root, "fsharp-input", name);
         public string FSharpPublished(string name) => Path.Combine(Root, "obj", "fsharp-publish", name);
@@ -320,13 +310,8 @@ public class SdkJsonLayoutTests : SdkTest
             }
         }
 
-        public void EditInput(string input, bool changed)
-        {
-            foreach (string path in Inputs[input])
-            {
-                Write(path, changed ? _originalInputs[path].Replace("preserved", "edited") : _originalInputs[path]);
-            }
-        }
+        public void EditDepsInput(bool changed) =>
+            Write(Output("redist.deps.json"), changed ? _originalDeps.Replace("preserved", "edited") : _originalDeps);
 
         public void Build(Dictionary<string, string>? properties = null, bool success = true)
         {
