@@ -24,10 +24,9 @@ public class SdkCopyLayoutTests : SdkTest
     /// file, without rewriting siblings or disturbing unowned output.
     /// </summary>
     [TestMethod]
-    [DataRow("PublishMSBuildExtensions")]
-    public void ChangedAndMissingFilesAreRepairedIndependently(string target)
+    public void ChangedAndMissingFilesAreRepairedIndependently()
     {
-        CopyProject project = CreateProject(target);
+        CopyProject project = CreateProject("PublishMSBuildExtensions");
         project.Build();
         string original = File.ReadAllText(project.Source);
         Dictionary<string, (DateTime Timestamp, string Contents)> siblings =
@@ -54,10 +53,9 @@ public class SdkCopyLayoutTests : SdkTest
     /// unchanged build, while existing files retain their contents and timestamps.
     /// </summary>
     [TestMethod]
-    [DataRow("PublishMSBuildExtensions")]
-    public void NewPayloadFilesAreDiscoveredOnWarmBuilds(string target)
+    public void NewPayloadFilesAreDiscoveredOnWarmBuilds()
     {
-        CopyProject project = CreateProject(target);
+        CopyProject project = CreateProject("PublishMSBuildExtensions");
         project.Build();
         Dictionary<string, (DateTime Timestamp, string Contents)> snapshot = Snapshot(project.ExpectedFiles);
         Write(Path.Combine(Path.GetDirectoryName(project.Source)!, "additional.targets"), "additional payload");
@@ -138,7 +136,7 @@ public class SdkCopyLayoutTests : SdkTest
 
     private static string Escape(string value) => SecurityElement.Escape(value)!;
 
-    private sealed record Observation(int Copies, int Publishes, ProjectInstance Project, string Text);
+    private sealed record Observation(int Copies, int Publishes, string Text);
 
     private sealed class CopyProject
     {
@@ -155,15 +153,9 @@ public class SdkCopyLayoutTests : SdkTest
             string usingTasks = string.Join(Environment.NewLine,
                 new[] { "Copy", "MSBuild", "WriteLinesToFile", "Error" }
                     .Select(name => $"<UsingTask TaskName=\"Microsoft.Build.Tasks.{name}\" AssemblyFile=\"{Escape(builtIn)}\" />"));
-            foreach (string name in new[] { "GenerateLayout.targets", "BundledSdks.targets", "BundledDotnetTools.targets" })
-            {
-                File.Copy(LayoutFiles.GetPath(name, Path.Combine("src", "Layout", "redist", "targets", name)),
-                    Path.Combine(root, name));
-            }
-            string buildTasks = Path.Combine(SdkTestContext.Current.ToolsetUnderTest.SdkFolderUnderTest,
-                "Sdks", "Microsoft.NET.Sdk", "tools", _framework, "Microsoft.NET.Build.Tasks.dll");
-            Write(Path.Combine(root, "runtime.json"),
-                """{"runtimes":{"any":{},"linux-x64":{"#import":["any"]},"win-x64":{"#import":["any"]},"osx-x64":{"#import":["any"]}}}""");
+            File.Copy(LayoutFiles.GetPath("GenerateLayout.targets",
+                Path.Combine("src", "Layout", "redist", "targets", "GenerateLayout.targets")),
+                Path.Combine(root, "GenerateLayout.targets"));
             _project = Write(Path.Combine(root, "copy-layout.proj"), $$"""
                 <Project>
                   {{usingTasks}}
@@ -171,31 +163,14 @@ public class SdkCopyLayoutTests : SdkTest
                     <RepoRoot>{{Escape(Path.Combine(root, "repo") + Path.DirectorySeparatorChar)}}</RepoRoot>
                     <OutputPath>{{Escape(OutputDirectory + Path.DirectorySeparatorChar)}}</OutputPath>
                     <ArtifactsBinDir>{{Escape(Path.Combine(root, "bin") + Path.DirectorySeparatorChar)}}</ArtifactsBinDir>
-                    <NuGetPackageRoot>{{Escape(PackageRoot + Path.DirectorySeparatorChar)}}</NuGetPackageRoot>
                     <Configuration>Debug</Configuration>
                     <SdkTargetFramework>{{_framework}}</SdkTargetFramework>
-                    <Version>1.0.0</Version>
-                    <BundledSdkVersion>1.0.0</BundledSdkVersion>
-                    <BundledToolVersion>1.0.0</BundledToolVersion>
+                    <NuGetPackageRoot>{{Escape(PackageRoot + Path.DirectorySeparatorChar)}}</NuGetPackageRoot>
                     <MicrosoftNETCoreAppHostPackageVersion>1.0.0</MicrosoftNETCoreAppHostPackageVersion>
                     <SharedFrameworkRid>linux-x64</SharedFrameworkRid>
-                    <ProductMonikerRid>linux-x64</ProductMonikerRid>
                     <ExeExtension>{{_extension}}</ExeExtension>
-                    <IncludeAspNetCoreRuntime>false</IncludeAspNetCoreRuntime>
-                    <MicrosoftNETBuildTasksAssembly>{{Escape(buildTasks)}}</MicrosoftNETBuildTasksAssembly>
-                    <RuntimeIdentifierGraphPath>{{Escape(Path.Combine(root, "runtime.json"))}}</RuntimeIdentifierGraphPath>
                   </PropertyGroup>
-                  <ItemGroup>
-                    <BundledDotnetTool Include="Example.Tool" Version="$(BundledToolVersion)"
-                                       RidSpecificPackageVersion="$(BundledToolVersion)" RidSpecificPackageRids="linux-x64;win-x64" />
-                  </ItemGroup>
                   <Import Project="GenerateLayout.targets" />
-                  <Import Project="BundledSdks.targets" />
-                  <Import Project="BundledDotnetTools.targets" />
-                  <ItemGroup>
-                    <BundledSdk Remove="@(BundledSdk)" />
-                    <BundledSdk Include="Example.Sdk" Version="$(BundledSdkVersion)" />
-                  </ItemGroup>
                 </Project>
                 """);
 
@@ -225,50 +200,9 @@ public class SdkCopyLayoutTests : SdkTest
                     Write(Path.Combine(extensions, "msbuildExtensions", "Microsoft", "Microsoft.NET.Build.Extensions", "tools", "net472", "excluded.dll"), "desktop excluded");
                     Destinations = [Destination, Output("Microsoft", "payload.targets"), Output("Current", "version.targets")];
                     break;
-                case "PublishSdks":
-                    foreach (string version in new[] { "1.0.0", "0.9.0" })
-                    {
-                        string package = Path.Combine(PackageRoot, "example.sdk", version);
-                        Write(Path.Combine(package, "example.sdk.nuspec"), "<package />");
-                        Write(Path.Combine(package, "Sdk", "Sdk.props"), version + " props");
-                        Write(Path.Combine(package, "Sdk", "Sdk.targets"), version + " targets");
-                        foreach (string excluded in new[] { "Icon.png", $"example.sdk.{version}.nupkg", $"example.sdk.{version}.nupkg.sha512", "Sdk/excluded.nupkg.metadata", "Sdk/.signature.p7s" })
-                        {
-                            Write(Path.Combine(package, excluded), "excluded");
-                        }
-                    }
-                    Destinations = [Destination, Path.ChangeExtension(Destination, ".targets")];
-                    break;
-                case "LayoutBundledTools":
-                    foreach (string version in new[] { "1.0.0", "0.9.0" })
-                    {
-                        foreach (string packageId in new[] { "example.tool", "example.tool.linux-x64", "example.tool.win-x64" })
-                        {
-                            string package = Path.Combine(PackageRoot, packageId, version);
-                            Write(Path.Combine(package, "excluded.nuspec"), "excluded");
-                            Write(Path.Combine(package, "tools", _framework, "any", "tool.dll"), packageId + version);
-                            Write(Path.Combine(package, "tools", _framework, "any", "tool.json"), "tool configuration " + version);
-                        }
-                    }
-                    Destinations = [Destination, Path.ChangeExtension(Destination, ".json")];
-                    break;
                 case "LayoutAppHostTemplate":
-                    foreach (string version in new[] { "1.0.0", "0.9.0" })
-                    {
-                        foreach (string rid in new[] { "linux-x64", "win-x64" })
-                        {
-                            Write(AppHostSource(version, rid), rid + version);
-                        }
-                    }
+                    Write(AppHostSource, "linux-x64 1.0.0");
                     Destinations = [Destination];
-                    break;
-                case "PublishDotnetWatchToRedist":
-                    Write(Source, "watch payload");
-                    string directory = Path.GetDirectoryName(Source)!;
-                    Write(Path.Combine(directory, "Microsoft.CodeAnalysis.dll"), "shared compiler excluded");
-                    Write(Path.Combine(directory, "cs", "Microsoft.CodeAnalysis.resources.dll"), "shared resources excluded");
-                    Write(Path.Combine(directory, "BuildHost-netcore", "Microsoft.CodeAnalysis.dll"), "build host dependency");
-                    Destinations = [Destination, Path.Combine(Path.GetDirectoryName(Destination)!, "BuildHost-netcore", "Microsoft.CodeAnalysis.dll")];
                     break;
                 default:
                     throw new ArgumentException("Unknown copy target.", nameof(target));
@@ -284,43 +218,27 @@ public class SdkCopyLayoutTests : SdkTest
         public string PackageRoot => Path.Combine(Root, "packages");
         public string OutputDirectory => Path.Combine(Root, "out");
         public string[] Destinations { get; }
-        public string Source => SourceFor([]);
-        public string Destination => DestinationFor([]);
+        public string Source => _target switch
+        {
+            "PublishContainersSdk" => Path.Combine(Root, "repo", "src", "Containers", "packaging", "build", "Microsoft.NET.Build.Containers.props"),
+            "PublishMSBuildExtensions" => Path.Combine(Root, "MSBuildImports", "import.props"),
+            "LayoutAppHostTemplate" => AppHostSource,
+            _ => throw new InvalidOperationException("Unknown copy target.")
+        };
+        public string Destination => _target switch
+        {
+            "PublishContainersSdk" => Output("Containers", "build", "Microsoft.NET.Build.Containers.props"),
+            "PublishMSBuildExtensions" => Output("import.props"),
+            "LayoutAppHostTemplate" => Output("AppHostTemplate", "apphost" + _extension),
+            _ => throw new InvalidOperationException("Unknown copy target.")
+        };
+        private string AppHostSource => Path.Combine(PackageRoot, "microsoft.netcore.app.host.linux-x64",
+            "1.0.0", "runtimes", "linux-x64", "native", "apphost" + _extension);
         public string ContainerTask => Output("Containers", "tasks", _framework, "container-task.txt");
         public string[] ExpectedFiles => _target == "PublishContainersSdk"
             ? [.. Destinations, ContainerTask, Output("unowned.keep")]
             : [.. Destinations, Output("unowned.keep")];
         public string Output(params string[] parts) => Path.Combine([OutputDirectory, .. parts]);
-
-        public string SourceFor(Dictionary<string, string> properties) => _target switch
-        {
-            "PublishContainersSdk" => Path.Combine(Root, "repo", "src", "Containers", "packaging", "build", "Microsoft.NET.Build.Containers.props"),
-            "PublishMSBuildExtensions" => Path.Combine(Root, "MSBuildImports", "import.props"),
-            "PublishSdks" => Path.Combine(PackageRoot, "example.sdk", properties.GetValueOrDefault("BundledSdkVersion", "1.0.0"), "Sdk", "Sdk.props"),
-            "LayoutBundledTools" => Path.Combine(PackageRoot,
-                properties.GetValueOrDefault("ProductMonikerRid", "linux-x64") == "osx-x64"
-                    ? "example.tool" : "example.tool." + properties.GetValueOrDefault("ProductMonikerRid", "linux-x64"),
-                properties.GetValueOrDefault("BundledToolVersion", "1.0.0"), "tools", _framework, "any", "tool.dll"),
-            "LayoutAppHostTemplate" => AppHostSource(properties.GetValueOrDefault("MicrosoftNETCoreAppHostPackageVersion", "1.0.0"),
-                properties.GetValueOrDefault("SharedFrameworkRid", "linux-x64")),
-            "PublishDotnetWatchToRedist" => Path.Combine(Root, "bin", "dotnet-watch", "Debug", _framework, "dotnet-watch.dll"),
-            _ => throw new InvalidOperationException("Unknown copy target.")
-        };
-
-        public string DestinationFor(Dictionary<string, string> properties) => _target switch
-        {
-            "PublishContainersSdk" => Output("Containers", "build", "Microsoft.NET.Build.Containers.props"),
-            "PublishMSBuildExtensions" => Output("import.props"),
-            "PublishSdks" => Output("Sdks", "Example.Sdk", "Sdk", "Sdk.props"),
-            "LayoutBundledTools" => Output("DotnetTools", "Example.Tool",
-                properties.GetValueOrDefault("BundledToolVersion", "1.0.0"), "tools", _framework, "any", "tool.dll"),
-            "LayoutAppHostTemplate" => Output("AppHostTemplate", "apphost" + _extension),
-            "PublishDotnetWatchToRedist" => Output("DotnetTools", "dotnet-watch", "1.0.0", "tools", _framework, "any", "dotnet-watch.dll"),
-            _ => throw new InvalidOperationException("Unknown copy target.")
-        };
-
-        private string AppHostSource(string version, string rid) =>
-            Path.Combine(PackageRoot, "microsoft.netcore.app.host." + rid, version, "runtimes", rid, "native", "apphost" + _extension);
 
         public Observation Build(Dictionary<string, string>? properties = null, bool success = true)
         {
@@ -336,7 +254,7 @@ public class SdkCopyLayoutTests : SdkTest
                 new BuildRequestData(instance, [_target]));
             (result.OverallResult == BuildResultCode.Success).Should().Be(success,
                 "MSBuild log:{0}{1}{0}Binlog: {2}", Environment.NewLine, logger.Text, binlog);
-            return new Observation(logger.Copies, logger.Publishes, instance, logger.Text);
+            return new Observation(logger.Copies, logger.Publishes, logger.Text);
         }
     }
 
