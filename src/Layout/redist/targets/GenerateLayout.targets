@@ -185,7 +185,7 @@
          and app binary name are already represented by the paths; changes to the
          signing command are covered by the defining targets file. -->
     <WriteLinesToFile File="%(_RoslynAppHost.InputsFile)"
-                      Lines="%(_RoslynAppHost.GenerationInputs);Destination=%(_RoslynAppHost.DestinationPath);EnableMacOSCodeSign=$(_SdkAppHostEnableMacOSCodeSign)"
+                      Lines="%(_RoslynAppHost.GenerationInputs);Destination=%(_RoslynAppHost.DestinationPath);EnableMacOSCodeSign=$(_SdkAppHostEnableMacOSCodeSign);RoslynPackagePath=$(RoslynPackagePath)"
                       Overwrite="true"
                       WriteOnlyWhenDifferent="true" />
     <ReadLinesFromFile File="%(_RoslynAppHost.CompletionFile)"

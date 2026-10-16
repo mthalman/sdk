@@ -101,6 +101,32 @@ public class SdkAppHostTests : SdkTest
     }
 
     /// <summary>
+    /// Verifies changing the selected Roslyn package invalidates compiler apphosts
+    /// even when the replacement package files have older timestamps.
+    /// </summary>
+    [TestMethod]
+    public void ChangingRoslynPackageInvalidatesCompilerAppHosts()
+    {
+        AppHostProject project = CreateProject();
+        project.Build();
+        string alternatePackage = project.RoslynPackageDirectoryAt("2.0.0");
+        foreach (string name in new[] { "csc", "vbc", "VBCSCompiler" })
+        {
+            string source = Path.Combine(project.RoslynPackageDirectory, name + ".dll");
+            string destination = Path.Combine(alternatePackage, name + ".dll");
+            Copy(source, destination);
+            File.SetLastWriteTimeUtc(destination, DateTime.UnixEpoch);
+        }
+
+        Dictionary<string, string> properties = new()
+        {
+            ["MicrosoftNetCompilersToolsetVersion"] = "2.0.0"
+        };
+        project.Build(properties).CreatedHosts.Should().Be(3);
+        project.Build(properties).CreatedHosts.Should().Be(0);
+    }
+
+    /// <summary>
     /// Verifies reprocessing a newer template with identical bytes invalidates all
     /// hosts once, then settles without using native files as processing-freshness stamps.
     /// </summary>
@@ -246,7 +272,9 @@ public class SdkAppHostTests : SdkTest
         public string BuildTasksAssembly { get; }
         public string Rid => RuntimeInformation.RuntimeIdentifier;
         public string OutputDirectory => Path.Combine(Root, "out");
-        public string RoslynPackageDirectory => Path.Combine(Root, "packages", "microsoft.net.compilers.toolset", "1.0.0", "tasks", "netcore", "bincore");
+        public string RoslynPackageDirectory => RoslynPackageDirectoryAt("1.0.0");
+        public string RoslynPackageDirectoryAt(string version) =>
+            Path.Combine(Root, "packages", "microsoft.net.compilers.toolset", version, "tasks", "netcore", "bincore");
         public string Template => TemplateAt(Path.Combine(Root, "packages"), Rid, "1.0.0", Extension);
         public string TemplateAt(string packages, string rid, string version, string extension) =>
             Path.Combine(packages, "microsoft.netcore.app.host." + rid, version, "runtimes", rid, "native", "apphost" + extension);
