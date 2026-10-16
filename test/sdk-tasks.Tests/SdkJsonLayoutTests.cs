@@ -3,7 +3,6 @@
 
 using System.Security;
 using System.Text.Json.Nodes;
-using System.Xml.Linq;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
@@ -404,12 +403,7 @@ public class SdkJsonLayoutTests : SdkTest
                         .Select(name => $"<UsingTask TaskName=\"Microsoft.Build.Tasks.{name}\" AssemblyFile=\"{Escape(builtIn)}\" />")));
             string source = LayoutFiles.GetPath("GenerateLayout.targets",
                 Path.Combine("src", "Layout", "redist", "targets", "GenerateLayout.targets"));
-            XDocument targets = XDocument.Load(source);
-            // Native apphost creation/signing belongs to a separate producer family.
-            XElement roslynTarget = targets.Descendants("Target").Single(element => (string?)element.Attribute("Name") == "PublishRoslyn");
-            roslynTarget.Elements("CreateAppHost").Remove();
-            roslynTarget.Elements("Exec").Remove();
-            targets.Save(Path.Combine(root, "GenerateLayout.targets"));
+            File.Copy(source, Path.Combine(root, "GenerateLayout.targets"));
             _project = Write(Path.Combine(root, "json-layout.proj"), $$"""
                 <Project>
                   {{usingTasks}}

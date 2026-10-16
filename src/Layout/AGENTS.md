@@ -66,6 +66,38 @@ sweep, including legacy `15.0` relocation and the testhost runtimeconfig exclusi
 Production-target coverage is in
 [`SdkJsonLayoutTests`](../../test/sdk-tasks.Tests/SdkJsonLayoutTests.cs).
 
+Compiler/MSBuild apphost generation in
+[`GenerateLayout.targets`](redist/targets/GenerateLayout.targets) uses per-host
+input state and completion under `IntermediateOutputPath/incremental-layout/apphosts`.
+Preparation always runs: its `Outputs` batches by host, without `Inputs` that could
+skip missing-output or invalid-marker checks. Generation separately tracks template,
+managed assembly, implementation, and applicable entitlement timestamps, plus
+content-stable property/mapping/signing state. Reuse the effective generation file
+list in saved state, with only the destination and signing option added; do not
+maintain another list of derived properties or literal command text.
+Core HostModel is at the MSBuild root,
+not beside the SDK build-task assembly; desktop tasks carry it beside their assembly.
+Do not introduce nonexistent timestamp inputs that force perpetual regeneration.
+
+Delete completion before generating a host and recreate it only after native creation
+and any entitlement signing succeed. Keep Roslyn payload enumeration/copying outside
+skippable generation, and keep optional Windows TLB copying outside MSBuild-host
+generation so missing or updated payloads still repair. Preserve the existing
+RID/signing and host executable-extension selection. Production-target coverage and
+native SDK tool launch checks are in
+[`SdkAppHostTests`](../../test/sdk-tasks.Tests/SdkAppHostTests.cs); its simulated
+signing cases validate control flow, not real macOS signatures.
+
+Keep verbatim payload staging incremental at the `Copy` task rather than stamping
+the whole producer. Package/RID selection in
+[`BundledSdks.targets`](redist/targets/BundledSdks.targets) and
+[`BundledDotnetTools.targets`](redist/targets/BundledDotnetTools.targets), source
+discovery, missing-input errors, and existing `CopiedFiles`/`FileWrites` item flow must
+remain available on warm invocations. `PublishContainersSdk` skips unchanged build
+imports but still invokes child `Publish`; the child's project graph owns task-output
+invalidation and repair. Production-target coverage is in
+[`SdkCopyLayoutTests`](../../test/sdk-tasks.Tests/SdkCopyLayoutTests.cs).
+
 ### Workload manifest layout ownership
 
 [`LayoutManifests`](redist/targets/BundledManifests.targets) may only delete the

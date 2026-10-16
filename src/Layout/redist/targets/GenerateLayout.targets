@@ -97,7 +97,12 @@
                       WriteOnlyWhenDifferent="true" />
   </Target>
 
-  <Target Name="PublishRoslyn">
+  <!-- Keep the public producer as an orchestrator: Roslyn's payload must still be
+       enumerated and copied when all native compiler apphosts are already current. -->
+  <Target Name="PublishRoslyn"
+          DependsOnTargets="_PublishRoslynFiles;_CreateRoslynAppHosts" />
+
+  <Target Name="_PublishRoslynFiles">
     <PropertyGroup>
       <RoslynPackagePath>$(NuGetPackageRoot)microsoft.net.compilers.toolset\$(MicrosoftNetCompilersToolsetVersion)\tasks\netcore\</RoslynPackagePath>
     </PropertyGroup>
@@ -131,26 +136,142 @@
                          MicrosoftAspNetCoreAppVersion="$(MicrosoftAspNetCoreAppRuntimePackageVersion)"
                          Condition="'@(_RoslynRuntimeConfig)' != ''" />
 
-    <CreateAppHost AppHostSourcePath="$(NuGetPackageRoot)\microsoft.netcore.app.host.$(SharedFrameworkRid)\$(MicrosoftNETCoreAppHostPackageVersion)\runtimes\$(SharedFrameworkRid)\native\apphost$(ExeExtension)"
-                   AppHostDestinationPath="%(_RoslynAppHost.RootDir)%(_RoslynAppHost.Directory)%(_RoslynAppHost.Filename)$(ExeExtension)"
-                   AppBinaryName="%(_RoslynAppHost.Filename)%(_RoslynAppHost.Extension)"
-                   IntermediateAssembly="%(_RoslynAppHost.FullPath)"
-                   EnableMacOSCodeSign="$(SharedFrameworkRid.StartsWith('osx'))" />
-
-    <Exec Command="codesign --sign - --force --entitlements '$(MSBuildProjectDirectory)/roslyn-entitlements.plist' %(_RoslynAppHost.RootDir)%(_RoslynAppHost.Directory)%(_RoslynAppHost.Filename)$(ExeExtension)"
-          Condition="$(SharedFrameworkRid.StartsWith('osx'))" />
   </Target>
 
-  <Target Name="CreateMSBuildAppHost">
-    <CreateAppHost AppHostSourcePath="$(NuGetPackageRoot)\microsoft.netcore.app.host.$(SharedFrameworkRid)\$(MicrosoftNETCoreAppHostPackageVersion)\runtimes\$(SharedFrameworkRid)\native\apphost$(ExeExtension)"
-                   AppHostDestinationPath="%(_MSBuildAppHost.RootDir)%(_MSBuildAppHost.Directory)%(_MSBuildAppHost.Filename)$(ExeExtension)"
+  <!-- Both apphost families use the same template and task implementation, but have
+       separate preparation/generation targets so either public producer can still
+       be invoked independently. Use the existing host/target RID and executable-
+       extension selection; this must not introduce a new cross-build policy. -->
+  <Target Name="_PrepareSdkAppHostConfiguration">
+    <PropertyGroup>
+      <_SdkAppHostStateDirectory>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'incremental-layout', 'apphosts'))</_SdkAppHostStateDirectory>
+      <_SdkAppHostTemplate>$([MSBuild]::NormalizePath('$(NuGetPackageRoot)', 'microsoft.netcore.app.host.$(SharedFrameworkRid)', '$(MicrosoftNETCoreAppHostPackageVersion)', 'runtimes', '$(SharedFrameworkRid)', 'native', 'apphost$(ExeExtension)'))</_SdkAppHostTemplate>
+      <!-- Core tasks share HostModel from the SDK/MSBuild root; desktop tasks carry
+           it beside their task assembly. A nonexistent input would prevent skipping. -->
+      <_SdkAppHostHostModelAssembly Condition="'$(MSBuildRuntimeType)' == 'Core'">$([MSBuild]::NormalizePath('$(MSBuildBinPath)', 'Microsoft.NET.HostModel.dll'))</_SdkAppHostHostModelAssembly>
+      <_SdkAppHostHostModelAssembly Condition="'$(MSBuildRuntimeType)' != 'Core'">$([MSBuild]::NormalizePath('$(MicrosoftNETBuildTasksDirectory)', 'Microsoft.NET.HostModel.dll'))</_SdkAppHostHostModelAssembly>
+      <_SdkAppHostEnableMacOSCodeSign>$(SharedFrameworkRid.StartsWith('osx'))</_SdkAppHostEnableMacOSCodeSign>
+      <_SdkAppHostRoslynEntitlements Condition="'$(_SdkAppHostEnableMacOSCodeSign)' == 'true'">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', 'roslyn-entitlements.plist'))</_SdkAppHostRoslynEntitlements>
+      <_SdkAppHostMSBuildEntitlements Condition="'$(_SdkAppHostEnableMacOSCodeSign)' == 'true'">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', 'msbuild-entitlements.plist'))</_SdkAppHostMSBuildEntitlements>
+      <!-- Reuse the same template/implementation list in both families' generation
+           inputs and saved state, rather than maintaining a second description. -->
+      <_SdkAppHostCommonInputs>$(_SdkAppHostTemplate);$(MicrosoftNETBuildTasksAssembly);$(_SdkAppHostHostModelAssembly);$(SdkTasksAssembly);$(_GenerateLayoutTargetsFile)</_SdkAppHostCommonInputs>
+    </PropertyGroup>
+  </Target>
+
+  <!-- Outputs partitions preparation into one batch per host. There is deliberately
+       no Inputs attribute here: preparation must always check each published host
+       and its completion marker before generation's timestamp check can skip work.
+       A shared family stamp would unnecessarily regenerate unaffected siblings. -->
+  <Target Name="_PrepareRoslynAppHosts"
+          DependsOnTargets="_PublishRoslynFiles;_PrepareSdkAppHostConfiguration"
+          Outputs="$(_SdkAppHostStateDirectory)roslyn-%(_RoslynAppHost.Filename).complete"
+          Condition="'@(_RoslynAppHost)' != ''">
+    <ItemGroup>
+      <_RoslynAppHost Update="@(_RoslynAppHost)">
+        <DestinationPath>$([MSBuild]::NormalizePath('%(RootDir)%(Directory)', '%(Filename)$(ExeExtension)'))</DestinationPath>
+        <InputsFile>$(_SdkAppHostStateDirectory)roslyn-%(Filename).inputs</InputsFile>
+        <CompletionFile>$(_SdkAppHostStateDirectory)roslyn-%(Filename).complete</CompletionFile>
+        <GenerationInputs>$(_SdkAppHostCommonInputs);%(FullPath);$(_SdkAppHostRoslynEntitlements)</GenerationInputs>
+      </_RoslynAppHost>
+    </ItemGroup>
+    <PropertyGroup>
+      <_RoslynAppHostCompletionValue />
+    </PropertyGroup>
+
+    <!-- Save the effective file list as well as comparing its timestamps: a remap
+         to an older package/assembly must invalidate previous completion. Only the
+         destination and non-file signing option need extra state. RID, extension,
+         and app binary name are already represented by the paths; changes to the
+         signing command are covered by the defining targets file. -->
+    <WriteLinesToFile File="%(_RoslynAppHost.InputsFile)"
+                      Lines="%(_RoslynAppHost.GenerationInputs);Destination=%(_RoslynAppHost.DestinationPath);EnableMacOSCodeSign=$(_SdkAppHostEnableMacOSCodeSign)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <ReadLinesFromFile File="%(_RoslynAppHost.CompletionFile)"
+                       Condition="Exists('%(_RoslynAppHost.CompletionFile)')">
+      <Output TaskParameter="Lines" PropertyName="_RoslynAppHostCompletionValue" />
+    </ReadLinesFromFile>
+    <Delete Files="%(_RoslynAppHost.CompletionFile)"
+            Condition="!Exists('%(_RoslynAppHost.DestinationPath)') or
+                       (Exists('%(_RoslynAppHost.CompletionFile)') and '$(_RoslynAppHostCompletionValue)' != 'complete')" />
+  </Target>
+
+  <!-- Completion is processing freshness, not a shipping file. Remove it before
+       generation and recreate it only after explicit macOS entitlement signing has
+       succeeded. A failed/interrupted signing operation must not leave a fresh
+       apphost that causes the next build to skip repair. -->
+  <Target Name="_CreateRoslynAppHosts"
+          DependsOnTargets="_PrepareRoslynAppHosts"
+          Inputs="%(_RoslynAppHost.GenerationInputs);%(_RoslynAppHost.InputsFile)"
+          Outputs="%(_RoslynAppHost.CompletionFile)"
+          Condition="'@(_RoslynAppHost)' != ''">
+    <Delete Files="%(_RoslynAppHost.CompletionFile)" />
+    <CreateAppHost AppHostSourcePath="$(_SdkAppHostTemplate)"
+                   AppHostDestinationPath="%(_RoslynAppHost.DestinationPath)"
+                   AppBinaryName="%(_RoslynAppHost.Filename)%(_RoslynAppHost.Extension)"
+                   IntermediateAssembly="%(_RoslynAppHost.FullPath)"
+                   EnableMacOSCodeSign="$(_SdkAppHostEnableMacOSCodeSign)" />
+
+    <Exec Command="codesign --sign - --force --entitlements '$(_SdkAppHostRoslynEntitlements)' &quot;%(_RoslynAppHost.DestinationPath)&quot;"
+          Condition="'$(_SdkAppHostEnableMacOSCodeSign)' == 'true'" />
+    <CompleteIncrementalLayout ExpectedOutputs="%(_RoslynAppHost.DestinationPath)"
+                               CompletionStampFile="%(_RoslynAppHost.CompletionFile)" />
+  </Target>
+
+  <Target Name="_PrepareMSBuildAppHosts"
+          DependsOnTargets="_PrepareSdkAppHostConfiguration"
+          Outputs="$(_SdkAppHostStateDirectory)msbuild-%(_MSBuildAppHost.Filename).complete"
+          Condition="'@(_MSBuildAppHost)' != ''">
+    <ItemGroup>
+      <_MSBuildAppHost Update="@(_MSBuildAppHost)">
+        <DestinationPath>$([MSBuild]::NormalizePath('%(RootDir)%(Directory)', '%(Filename)$(ExeExtension)'))</DestinationPath>
+        <InputsFile>$(_SdkAppHostStateDirectory)msbuild-%(Filename).inputs</InputsFile>
+        <CompletionFile>$(_SdkAppHostStateDirectory)msbuild-%(Filename).complete</CompletionFile>
+        <GenerationInputs>$(_SdkAppHostCommonInputs);%(FullPath);$(_SdkAppHostMSBuildEntitlements)</GenerationInputs>
+      </_MSBuildAppHost>
+    </ItemGroup>
+    <PropertyGroup>
+      <_MSBuildAppHostCompletionValue />
+    </PropertyGroup>
+    <!-- Use the same per-host input/completion contract as the compilers, without
+         coupling MSBuild's host to Roslyn payload preparation or compiler freshness. -->
+    <WriteLinesToFile File="%(_MSBuildAppHost.InputsFile)"
+                      Lines="%(_MSBuildAppHost.GenerationInputs);Destination=%(_MSBuildAppHost.DestinationPath);EnableMacOSCodeSign=$(_SdkAppHostEnableMacOSCodeSign)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <ReadLinesFromFile File="%(_MSBuildAppHost.CompletionFile)"
+                       Condition="Exists('%(_MSBuildAppHost.CompletionFile)')">
+      <Output TaskParameter="Lines" PropertyName="_MSBuildAppHostCompletionValue" />
+    </ReadLinesFromFile>
+    <Delete Files="%(_MSBuildAppHost.CompletionFile)"
+            Condition="!Exists('%(_MSBuildAppHost.DestinationPath)') or
+                       (Exists('%(_MSBuildAppHost.CompletionFile)') and '$(_MSBuildAppHostCompletionValue)' != 'complete')" />
+  </Target>
+
+  <Target Name="_CreateMSBuildAppHosts"
+          DependsOnTargets="_PrepareMSBuildAppHosts"
+          Inputs="%(_MSBuildAppHost.GenerationInputs);%(_MSBuildAppHost.InputsFile)"
+          Outputs="%(_MSBuildAppHost.CompletionFile)"
+          Condition="'@(_MSBuildAppHost)' != ''">
+    <Delete Files="%(_MSBuildAppHost.CompletionFile)" />
+    <CreateAppHost AppHostSourcePath="$(_SdkAppHostTemplate)"
+                   AppHostDestinationPath="%(_MSBuildAppHost.DestinationPath)"
                    AppBinaryName="%(_MSBuildAppHost.Filename)%(_MSBuildAppHost.Extension)"
                    IntermediateAssembly="%(_MSBuildAppHost.FullPath)"
-                   EnableMacOSCodeSign="$(SharedFrameworkRid.StartsWith('osx'))" />
+                   EnableMacOSCodeSign="$(_SdkAppHostEnableMacOSCodeSign)" />
+    <Exec Command="codesign --sign - --force --entitlements '$(_SdkAppHostMSBuildEntitlements)' &quot;%(_MSBuildAppHost.DestinationPath)&quot;"
+          Condition="'$(_SdkAppHostEnableMacOSCodeSign)' == 'true'" />
+    <CompleteIncrementalLayout ExpectedOutputs="%(_MSBuildAppHost.DestinationPath)"
+                               CompletionStampFile="%(_MSBuildAppHost.CompletionFile)" />
+  </Target>
 
+  <Target Name="CreateMSBuildAppHost"
+          DependsOnTargets="_CreateMSBuildAppHosts">
     <!-- Copy the COM type library next to the apphost on Windows (needed for ITaskHost marshaling).
          The .tlb is generated by the MSBuild build (CreateTypeLib target) and included in the
-         Microsoft.Build.Framework NuGet package under tools/net472/. -->
+         Microsoft.Build.Framework NuGet package under tools/net472/. Keep this copy
+         outside the skippable host target so a missing or updated TLB is still repaired. -->
     <PropertyGroup Condition="$(SharedFrameworkRid.StartsWith('win'))">
       <_FrameworkTlbPath>$(NuGetPackageRoot)microsoft.build.framework\$(MicrosoftBuildVersion)\tools\net472\Microsoft.Build.Framework.tlb</_FrameworkTlbPath>
     </PropertyGroup>
@@ -159,8 +280,6 @@
           SkipUnchangedFiles="true"
           Condition="$(SharedFrameworkRid.StartsWith('win')) AND Exists('$(_FrameworkTlbPath)')" />
 
-    <Exec Command="codesign --sign - --force --entitlements '$(MSBuildProjectDirectory)/msbuild-entitlements.plist' %(_MSBuildAppHost.RootDir)%(_MSBuildAppHost.Directory)%(_MSBuildAppHost.Filename)$(ExeExtension)"
-          Condition="$(SharedFrameworkRid.StartsWith('osx'))" />
   </Target>
 
   <Target Name="PublishNETAnalyzers">
@@ -415,7 +534,12 @@
       <BuildFiles Include="$(RepoRoot)/src/Containers/packaging/build/Microsoft.NET.Build.Containers.targets" />
     </ItemGroup>
 
-    <Copy SourceFiles="@(BuildFiles)" DestinationFolder="$(OutputPath)/Containers/build" />
+    <!-- Skip unchanged imports at file level, not the whole producer. The child
+         Publish must still run so its own build graph can process changed inputs
+         or repair missing task outputs independently of these build files. -->
+    <Copy SourceFiles="@(BuildFiles)"
+          DestinationFolder="$(OutputPath)/Containers/build"
+          SkipUnchangedFiles="true" />
 
     <MSBuild
       Targets="Publish"
