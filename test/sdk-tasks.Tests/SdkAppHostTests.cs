@@ -206,6 +206,11 @@ public class SdkAppHostTests : SdkTest
             File.Copy(LayoutFiles.GetPath("GenerateLayout.targets",
                 Path.Combine("src", "Layout", "redist", "targets", "GenerateLayout.targets")),
                 Path.Combine(root, "GenerateLayout.targets"));
+            foreach (string name in new[] { "roslyn-entitlements.plist", "msbuild-entitlements.plist" })
+            {
+                File.Copy(LayoutFiles.GetPath(name, Path.Combine("src", "Layout", "redist", name)),
+                    Path.Combine(root, name));
+            }
             string usingTasks = string.Join(Environment.NewLine,
                 new[] { "Copy", "Delete", "WriteLinesToFile", "ReadLinesFromFile", "Error" }
                     .Select(name => $"<UsingTask TaskName=\"Microsoft.Build.Tasks.{name}\" AssemblyFile=\"{Escape(builtIn)}\" />"));
