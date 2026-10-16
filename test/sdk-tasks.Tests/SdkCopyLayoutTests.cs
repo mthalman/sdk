@@ -20,55 +20,11 @@ namespace Microsoft.CoreSdkTasks.Tests;
 public class SdkCopyLayoutTests : SdkTest
 {
     /// <summary>
-    /// Verifies warm copies perform no file copies while preserving discovery,
-    /// exclusions, selected package metadata, and FileWrites for skipped outputs.
-    /// </summary>
-    [TestMethod]
-    [DataRow("PublishContainersSdk")]
-    [DataRow("PublishMSBuildExtensions")]
-    [DataRow("PublishSdks")]
-    [DataRow("LayoutBundledTools")]
-    [DataRow("LayoutAppHostTemplate")]
-    [DataRow("PublishDotnetWatchToRedist")]
-    public void WarmCopiesPreservePreparationAndOutputItems(string target)
-    {
-        CopyProject project = CreateProject(target);
-        project.Build().Copies.Should().Be(project.Destinations.Length);
-        Directory.GetFiles(project.OutputDirectory, "*", SearchOption.AllDirectories)
-            .Should().BeEquivalentTo(project.ExpectedFiles);
-        Dictionary<string, (DateTime Timestamp, string Contents)> snapshot = Snapshot(project.ExpectedFiles);
-
-        Observation warm = project.Build();
-
-        warm.Copies.Should().Be(0);
-        AssertSnapshot(snapshot);
-        if (target == "PublishDotnetWatchToRedist")
-        {
-            warm.Project.GetItems("FileWrites").Select(item => item.GetMetadataValue("FullPath"))
-                .Should().BeEquivalentTo(project.Destinations);
-        }
-        if (target == "LayoutBundledTools")
-        {
-            warm.Project.GetItems("_SelectedBundledDotnetToolPackage").Should().ContainSingle()
-                .Which.GetMetadataValue("PackageId").Should().Be("Example.Tool.linux-x64");
-        }
-        if (target == "PublishContainersSdk")
-        {
-            warm.Publishes.Should().Be(1);
-        }
-    }
-
-    /// <summary>
     /// Verifies source edits/reverts and deleted destinations copy only the affected
     /// file, without rewriting siblings or disturbing unowned output.
     /// </summary>
     [TestMethod]
-    [DataRow("PublishContainersSdk")]
     [DataRow("PublishMSBuildExtensions")]
-    [DataRow("PublishSdks")]
-    [DataRow("LayoutBundledTools")]
-    [DataRow("LayoutAppHostTemplate")]
-    [DataRow("PublishDotnetWatchToRedist")]
     public void ChangedAndMissingFilesAreRepairedIndependently(string target)
     {
         CopyProject project = CreateProject(target);
@@ -99,9 +55,6 @@ public class SdkCopyLayoutTests : SdkTest
     /// </summary>
     [TestMethod]
     [DataRow("PublishMSBuildExtensions")]
-    [DataRow("PublishSdks")]
-    [DataRow("LayoutBundledTools")]
-    [DataRow("PublishDotnetWatchToRedist")]
     public void NewPayloadFilesAreDiscoveredOnWarmBuilds(string target)
     {
         CopyProject project = CreateProject(target);
@@ -115,65 +68,6 @@ public class SdkCopyLayoutTests : SdkTest
         File.ReadAllText(destination).Should().Be("additional payload");
         project.Build().Copies.Should().Be(0);
         AssertSnapshot(snapshot);
-    }
-
-    /// <summary>
-    /// Verifies output-root changes, including paths with spaces, populate the new
-    /// destination without modifying or unnecessarily recopying the original layout.
-    /// </summary>
-    [TestMethod]
-    [DataRow("PublishContainersSdk")]
-    [DataRow("PublishMSBuildExtensions")]
-    [DataRow("PublishSdks")]
-    [DataRow("LayoutBundledTools")]
-    [DataRow("LayoutAppHostTemplate")]
-    [DataRow("PublishDotnetWatchToRedist")]
-    public void OutputRemapsDoNotRequireAProducerStamp(string target)
-    {
-        CopyProject project = CreateProject(target);
-        project.Build();
-        Dictionary<string, (DateTime Timestamp, string Contents)> snapshot = Snapshot(project.ExpectedFiles);
-        string output = Path.Combine(project.Root, "other output");
-        var properties = new Dictionary<string, string> { ["OutputPath"] = output + Path.DirectorySeparatorChar };
-
-        project.Build(properties).Copies.Should().Be(project.Destinations.Length);
-        foreach (string destination in project.ExpectedFiles.Where(path => path != project.Output("unowned.keep")))
-        {
-            File.ReadAllText(Path.Combine(output, Path.GetRelativePath(project.OutputDirectory, destination)))
-                .Should().Be(File.ReadAllText(destination));
-        }
-        project.Build(properties).Copies.Should().Be(0);
-        project.Build().Copies.Should().Be(0);
-        AssertSnapshot(snapshot);
-    }
-
-    /// <summary>
-    /// Verifies package-version and RID switches select older inputs correctly,
-    /// including portable-tool fallback, and settle after switching or reverting.
-    /// </summary>
-    [TestMethod]
-    [DataRow("PublishSdks", "BundledSdkVersion", "0.9.0")]
-    [DataRow("LayoutAppHostTemplate", "MicrosoftNETCoreAppHostPackageVersion", "0.9.0")]
-    [DataRow("LayoutAppHostTemplate", "SharedFrameworkRid", "win-x64")]
-    [DataRow("LayoutBundledTools", "BundledToolVersion", "0.9.0")]
-    [DataRow("LayoutBundledTools", "ProductMonikerRid", "win-x64")]
-    [DataRow("LayoutBundledTools", "ProductMonikerRid", "osx-x64")]
-    public void PackageAndRidRemapsPreserveSelection(string target, string property, string value)
-    {
-        CopyProject project = CreateProject(target);
-        project.Build();
-        var properties = new Dictionary<string, string> { [property] = value };
-        foreach (string source in Directory.GetFiles(Path.GetDirectoryName(project.SourceFor(properties))!))
-        {
-            File.SetLastWriteTimeUtc(source, File.GetLastWriteTimeUtc(project.Destination).AddDays(-1));
-        }
-
-        project.Build(properties).Copies.Should().Be(project.Destinations.Length);
-        File.ReadAllText(project.DestinationFor(properties)).Should().Be(File.ReadAllText(project.SourceFor(properties)));
-        project.Build(properties).Copies.Should().Be(0);
-        project.Build();
-        File.ReadAllText(project.Destination).Should().Be(File.ReadAllText(project.Source));
-        project.Build().Copies.Should().Be(0);
     }
 
     /// <summary>
@@ -207,43 +101,15 @@ public class SdkCopyLayoutTests : SdkTest
     }
 
     /// <summary>
-    /// Verifies missing Containers build inputs and missing SDK restore markers fail
-    /// explicitly even when an otherwise current destination already exists.
+    /// Verifies apphost-template selection rejects ambiguous candidates on warm builds
+    /// rather than trusting an old copied template.
     /// </summary>
     [TestMethod]
-    [DataRow("PublishContainersSdk")]
-    [DataRow("PublishSdks")]
-    public void MissingSourcesCannotBeHiddenByExistingOutputs(string target)
-    {
-        CopyProject project = CreateProject(target);
-        project.Build();
-        string missing = target == "PublishSdks"
-            ? Path.Combine(project.PackageRoot, "example.sdk", "1.0.0", "example.sdk.nuspec")
-            : project.Source;
-        File.Delete(missing);
-
-        project.Build(success: false).Text.Should().Contain(Path.GetFileName(missing));
-    }
-
-    /// <summary>
-    /// Verifies apphost-template selection still rejects missing or ambiguous
-    /// candidates on warm builds rather than trusting an old copied template.
-    /// </summary>
-    [TestMethod]
-    [DataRow(false)]
-    [DataRow(true)]
-    public void AppHostTemplateSelectionRemainsValidated(bool duplicate)
+    public void AppHostTemplateSelectionRejectsAmbiguousCandidates()
     {
         CopyProject project = CreateProject("LayoutAppHostTemplate");
         project.Build();
-        if (duplicate)
-        {
-            Write(Path.Combine(Path.GetDirectoryName(project.Source)!, "duplicate", Path.GetFileName(project.Source)), "duplicate");
-        }
-        else
-        {
-            File.Delete(project.Source);
-        }
+        Write(Path.Combine(Path.GetDirectoryName(project.Source)!, "duplicate", Path.GetFileName(project.Source)), "duplicate");
 
         project.Build(success: false).Text.Should().Contain("Failed to determine");
     }

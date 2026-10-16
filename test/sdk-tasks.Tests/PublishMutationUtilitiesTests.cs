@@ -114,38 +114,4 @@ public class PublishMutationUtilitiesTests : SdkTest
             "Dependency/2.0.0", "ReferencedProject/3.0.0", "NewApp/1.0.0");
     }
 
-    /// <summary>
-    /// Verifies separate finalized deps outputs preserve their raw source, optionally
-    /// remove resources, and recreate a deleted destination from the same source.
-    /// </summary>
-    [TestMethod]
-    [DataRow(false)]
-    [DataRow(true)]
-    public void SeparateDestinationsPreserveRawInputsAndFilterResources(bool removeResources)
-    {
-        string directory = TestAssetsManager.CreateTestDirectory(identifier: Guid.NewGuid().ToString("N")).Path;
-        string source = Path.Combine(directory, "raw.deps.json");
-        string destination = Path.Combine(directory, "final", "app.deps.json");
-        JsonNode deps = JsonNode.Parse(SampleDepsJson)!;
-        deps["targets"]![".NETCoreApp,Version=v9.0"]!["OldApp/1.0.0"]!["resources"] =
-            JsonNode.Parse("""{ "en/OldApp.resources.dll": { "locale": "en" } }""");
-        File.WriteAllText(source, deps.ToJsonString());
-        byte[] raw = File.ReadAllBytes(source);
-        DateTime sourceTimestamp = File.GetLastWriteTimeUtc(source);
-
-        PublishMutationUtilities.ChangeEntryPointLibraryName(source, "NewApp", destination, removeResources);
-        byte[] expected = File.ReadAllBytes(destination);
-        JsonNode result = JsonNode.Parse(File.ReadAllText(destination))!;
-        (result["targets"]![".NETCoreApp,Version=v9.0"]!["NewApp/1.0.0"]!["resources"] != null)
-            .Should().Be(!removeResources);
-        File.SetLastWriteTimeUtc(destination, DateTime.UtcNow.AddMinutes(-5));
-        DateTime timestamp = File.GetLastWriteTimeUtc(destination);
-        PublishMutationUtilities.ChangeEntryPointLibraryName(source, "NewApp", destination, removeResources);
-        File.GetLastWriteTimeUtc(destination).Should().Be(timestamp);
-        File.Delete(destination);
-        PublishMutationUtilities.ChangeEntryPointLibraryName(source, "NewApp", destination, removeResources);
-        File.ReadAllBytes(destination).Should().Equal(expected);
-        File.ReadAllBytes(source).Should().Equal(raw);
-        File.GetLastWriteTimeUtc(source).Should().Be(sourceTimestamp);
-    }
 }

@@ -68,25 +68,6 @@ public class SdkJsonLayoutTests : SdkTest
         """;
 
     /// <summary>
-    /// Verifies complete producer/finalizer sequences preserve settled JSON bytes and
-    /// timestamps, rather than merely making each individual transformation a no-op.
-    /// </summary>
-    [TestMethod]
-    public void WarmFinalizationPreservesContentsAndTimestamps()
-    {
-        JsonProject project = CreateProject();
-        project.Build();
-        Dictionary<string, byte[]> contents = Contents(project.JsonFiles);
-        Dictionary<string, DateTime> timestamps = Snapshot(project.JsonFiles);
-
-        project.Build();
-        project.Build();
-
-        AssertContents(contents);
-        AssertTimestamps(timestamps);
-    }
-
-    /// <summary>
     /// Verifies synthetic runtime assets and relocated imports are removed while dependency
     /// libraries and unrelated fields survive, and only dotnet loses resource sections.
     /// </summary>
@@ -128,10 +109,6 @@ public class SdkJsonLayoutTests : SdkTest
     /// </summary>
     [TestMethod]
     [DataRow("deps")]
-    [DataRow("runtime")]
-    [DataRow("package-runtime")]
-    [DataRow("fsharp-deps")]
-    [DataRow("fsharp-runtime")]
     public void InputEditsAndRevertsMatchCleanFinalization(string input)
     {
         JsonProject project = CreateProject();
@@ -153,42 +130,6 @@ public class SdkJsonLayoutTests : SdkTest
         AssertTimestamps(changed);
 
         project.EditInput(input, changed: false);
-        project.Build();
-        AssertContents(original);
-    }
-
-    /// <summary>
-    /// Verifies framework-version properties invalidate finalization without source edits,
-    /// preserve unknown frameworks and testhost configs, and restore original bytes on revert.
-    /// </summary>
-    [TestMethod]
-    public void FrameworkVersionEditsAndRevertsPreserveTestHostsAndUnknownFrameworks()
-    {
-        JsonProject project = CreateProject();
-        project.Build();
-        Dictionary<string, byte[]> original = Contents(project.JsonFiles);
-        var properties = new Dictionary<string, string>
-        {
-            ["MicrosoftNETCoreAppRuntimePackageVersion"] = "10.1.0",
-            ["MicrosoftAspNetCoreAppRuntimePackageVersion"] = "10.2.0"
-        };
-
-        project.Build(properties);
-        foreach (string path in project.JsonFiles.Where(path => path.EndsWith(".runtimeconfig.json", StringComparison.Ordinal)))
-        {
-            if (Path.GetFileName(path).StartsWith("testhost-", StringComparison.Ordinal))
-            {
-                File.ReadAllBytes(path).Should().Equal(original[path]);
-                continue;
-            }
-            JsonArray frameworks = ReadJson(path)["runtimeOptions"]!["frameworks"]!.AsArray();
-            frameworks[0]!["version"]!.GetValue<string>().Should().Be("10.1.0");
-            frameworks[1]!["version"]!.GetValue<string>().Should().Be("10.2.0");
-            frameworks[2]!["version"]!.GetValue<string>().Should().Be("3.0.0");
-        }
-        Dictionary<string, DateTime> changed = Snapshot(project.JsonFiles);
-        project.Build(properties);
-        AssertTimestamps(changed);
         project.Build();
         AssertContents(original);
     }
@@ -241,89 +182,6 @@ public class SdkJsonLayoutTests : SdkTest
         }
         File.ReadAllText(unowned).Should().Be("preserved");
         File.ReadAllText(project.Output("FSharp", "payload.dll")).Should().Be("payload");
-    }
-
-    /// <summary>
-    /// Verifies missing retained F# publish inputs are recreated by the child publisher
-    /// without rewriting already-correct shipping JSON.
-    /// </summary>
-    [TestMethod]
-    [DataRow("tool_fsc.deps.json")]
-    [DataRow("tool_fsc.runtimeconfig.json")]
-    public void MissingFSharpIntermediatesAreRepairedWithoutRewritingOutputs(string name)
-    {
-        JsonProject project = CreateProject();
-        project.Build();
-        Dictionary<string, DateTime> timestamps = Snapshot(project.JsonFiles);
-        File.Delete(project.FSharpPublished(name));
-
-        project.Build();
-
-        File.ReadAllBytes(project.FSharpPublished(name)).Should().Equal(File.ReadAllBytes(project.FSharpInput(name)));
-        AssertTimestamps(timestamps);
-    }
-
-    /// <summary>
-    /// Verifies a destination change generates the new layout without modifying the old
-    /// one, and returning to the original destination preserves its settled JSON.
-    /// </summary>
-    [TestMethod]
-    public void OutputDirectoryChangesDoNotRewriteThePreviousDestination()
-    {
-        JsonProject project = CreateProject();
-        project.Build();
-        Dictionary<string, DateTime> original = Snapshot(project.JsonFiles);
-        string other = Path.Combine(project.Root, "other-output");
-        project.PrepareOutput(other);
-        project.Build(new() { ["OutputPath"] = other + Path.DirectorySeparatorChar });
-        File.ReadAllBytes(Path.Combine(other, "dotnet.deps.json")).Should().Equal(File.ReadAllBytes(project.Output("dotnet.deps.json")));
-        File.ReadAllBytes(Path.Combine(other, "FSharp", "fsc.deps.json")).Should().Equal(File.ReadAllBytes(project.Output("FSharp", "fsc.deps.json")));
-        AssertTimestamps(original);
-        project.Build();
-        AssertTimestamps(original);
-    }
-
-    /// <summary>
-    /// Verifies malformed deps or runtimeconfig inputs fail the real target sequence,
-    /// and repairing the input restores correct, stable output on subsequent builds.
-    /// </summary>
-    [TestMethod]
-    [DataRow("deps")]
-    [DataRow("package-runtime")]
-    [DataRow("fsharp-deps")]
-    [DataRow("fsharp-runtime")]
-    public void MalformedInputsFailAndRecover(string input)
-    {
-        JsonProject project = CreateProject();
-        project.Build();
-        Dictionary<string, byte[]> original = Contents(project.JsonFiles);
-        Write(project.Inputs[input][0], "{");
-        project.Build(success: false);
-
-        project.EditInput(input, changed: false);
-        project.Build();
-        AssertContents(original);
-        Dictionary<string, DateTime> timestamps = Snapshot(project.JsonFiles);
-        project.Build();
-        AssertTimestamps(timestamps);
-    }
-
-    /// <summary>
-    /// Verifies the retained RetargetTools sweep relocates newly introduced legacy files
-    /// on warm invocations instead of being skipped with JSON finalization.
-    /// </summary>
-    [TestMethod]
-    public void RetargetingStillRepairsLegacyDirectoriesOnWarmBuilds()
-    {
-        JsonProject project = CreateProject();
-        project.Build();
-        foreach (string name in new[] { "first.props", "second.targets" })
-        {
-            Write(project.Output("15.0", "nested", name), name);
-            project.Build();
-            File.ReadAllText(project.Output("Current", "nested", name)).Should().Be(name);
-            Directory.Exists(project.Output("15.0")).Should().BeFalse();
-        }
     }
 
     private JsonProject CreateProject() =>

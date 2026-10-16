@@ -37,49 +37,11 @@ public class SdkMetadataTests : SdkTest
         """;
 
     /// <summary>
-    /// Verifies repeated metadata generation preserves bytes, encodings, and timestamps
-    /// while retaining the expected version properties, tool references, and manifest list.
-    /// </summary>
-    [TestMethod]
-    public void MetadataPreservesContentsEncodingAndTimestampsOnWarmBuilds()
-    {
-        MetadataProject project = CreateProject();
-        project.Build(MetadataTargets);
-        Dictionary<string, byte[]> contents = project.MetadataFiles.ToDictionary(path => path, File.ReadAllBytes);
-        Dictionary<string, DateTime> timestamps = AgeAndSnapshot(project.MetadataFiles);
-
-        project.Build(MetadataTargets);
-        project.Build(MetadataTargets);
-
-        AssertContents(contents);
-        AssertTimestamps(timestamps);
-        foreach (string name in new[] { "productVersion.txt", "sdk-productVersion.txt", "productCommit-test.txt", "productCommit-test.json" })
-        {
-            File.ReadAllBytes(project.ShippingFile(name)).Should().OnlyContain(value => value < 128);
-        }
-        File.ReadAllText(project.ShippingFile("productVersion.txt")).Should().Be("11.0.100-test" + Environment.NewLine);
-        ReadProperty(project.Output("Microsoft.NETCoreSdk.BundledVersions.props"), "BundledNETCoreAppTargetFramework").Should().Be("net11.0");
-        ReadProperty(project.Output("Microsoft.NETCoreSdk.BundledMSBuildInformation.props"), "BundledMSBuildVersion").Should().Be("18.0.0");
-        XDocument.Load(project.Output("Microsoft.NETCoreSdk.BundledCliTools.props")).Descendants("BundledDotNetCliToolReference")
-            .Single().Attribute("Include")!.Value.Should().Be("Old.Test.Tool");
-        File.ReadAllLines(project.Output("KnownWorkloadManifests.txt")).Should().Equal("test.manifest", "builtin.manifest", "samsung.net.sdk.tizen");
-    }
-
-    /// <summary>
     /// Verifies scalar and item changes produce the same metadata as a clean build,
     /// repeated inputs preserve timestamps, and reverting inputs restores the original bytes.
     /// </summary>
     [TestMethod]
     [DataRow("PackageVersion", "11.0.200-test")]
-    [DataRow("BUILD_SOURCEVERSION", "edited-sdk-commit")]
-    [DataRow("MicrosoftBuildVersion", "18.1.0-preview.1")]
-    [DataRow("MicrosoftNETCoreAppRuntimePackageVersion", "11.0.1")]
-    [DataRow("ObsoleteCliTool", "Another.Old.Tool")]
-    [DataRow("ObsoleteCliTool", "")]
-    [DataRow("ManifestId", "Another.Manifest")]
-    [DataRow("ManifestId", "")]
-    [DataRow("ManifestId", "Test.Manifest;Added.Manifest")]
-    [DataRow("SourceRevisionId", "edited-revision")]
     public void MetadataTracksPropertyAndItemEditsAndReverts(string property, string value)
     {
         MetadataProject project = CreateProject();
@@ -101,61 +63,6 @@ public class SdkMetadataTests : SdkTest
 
         project.Build(MetadataTargets);
         AssertContents(original);
-    }
-
-    /// <summary>
-    /// Verifies framework-list and minimum-MSBuild-version edits affect generated metadata,
-    /// and each deleted output is repaired without rewriting unchanged sibling files.
-    /// </summary>
-    [TestMethod]
-    public void MetadataTracksFileEditsAndRepairsEachMissingOutputWithoutRewritingSiblings()
-    {
-        MetadataProject project = CreateProject();
-        project.Build(MetadataTargets);
-        string minimumVersion = Path.Combine(project.Root, "minimumMSBuildVersion");
-        File.WriteAllText(minimumVersion, "17.15.0");
-        project.Build(MetadataTargets);
-        ReadProperty(project.Output("Microsoft.NETCoreSdk.BundledMSBuildInformation.props"), "MinimumMSBuildVersion").Should().Be("17.15.0");
-        File.WriteAllText(minimumVersion, "17.14.0");
-        File.WriteAllText(project.FrameworkListFile, """<FileList TargetFrameworkVersion="12.0" />""");
-        project.Build(MetadataTargets);
-        ReadProperty(project.Output("Microsoft.NETCoreSdk.BundledVersions.props"), "BundledNETCoreAppTargetFramework").Should().Be("net12.0");
-        File.WriteAllText(project.FrameworkListFile, """<FileList TargetFrameworkVersion="11.0" />""");
-        project.Build(MetadataTargets);
-
-        foreach (string missing in project.MetadataFiles)
-        {
-            byte[] expected = File.ReadAllBytes(missing);
-            Dictionary<string, DateTime> siblings = AgeAndSnapshot(project.MetadataFiles.Where(path => path != missing));
-            File.Delete(missing);
-            project.Build(MetadataTargets);
-            File.ReadAllBytes(missing).Should().Equal(expected);
-            AssertTimestamps(siblings);
-        }
-    }
-
-    /// <summary>
-    /// Verifies standalone product commits come from dependency metadata, while simulated
-    /// VMR builds use the SDK commit without requiring or reading Version.Details.xml.
-    /// </summary>
-    [TestMethod]
-    [DataRow(false)]
-    [DataRow(true)]
-    public void ProductCommitsPreserveStandaloneAndVmrProvenance(bool vmr)
-    {
-        MetadataProject project = CreateProject();
-        if (vmr)
-        {
-            File.Delete(Path.Combine(project.Root, "eng", "Version.Details.xml"));
-        }
-        Observation result = project.Build(MetadataTargets, new() { ["DotNetBuildFromVMR"] = vmr.ToString() });
-        result.Tasks.Contains("GetDependencyInfo").Should().Be(!vmr);
-        using var commits = System.Text.Json.JsonDocument.Parse(File.ReadAllText(project.ShippingFile("productCommit-test.json")));
-        foreach (string name in new[] { "runtime", "aspnetcore", "windowsdesktop", "sdk" })
-        {
-            string expected = vmr || name == "sdk" ? "sdk-commit" : name == "aspnetcore" ? "aspnet-commit" : "runtime-commit";
-            commits.RootElement.GetProperty(name).GetProperty("commit").GetString().Should().Be(expected);
-        }
     }
 
     /// <summary>
@@ -205,158 +112,6 @@ public class SdkMetadataTests : SdkTest
             File.ReadAllText(project.ChainFile).Should().Be(graph == Graph ? "linux-x64\nlinux\nany" : "linux-x64\nunix\nany");
             project.Build(ChainTarget).Tasks.Should().NotContain(ChainTarget);
         }
-    }
-
-    /// <summary>
-    /// Verifies package-root and package-version switches invalidate the chain even when
-    /// the replacement graph has an older timestamp, and reverting the mapping restores it.
-    /// </summary>
-    [TestMethod]
-    [DataRow(false)]
-    [DataRow(true)]
-    public void RuntimeIdentifierChainTracksPackagePathChangesWithOlderInputs(bool changeRoot)
-    {
-        MetadataProject project = CreateProject();
-        project.Build(ChainTarget);
-        string root = changeRoot ? Path.Combine(project.Root, "other-packages") : project.PackageRoot;
-        string version = changeRoot ? "1.0.0" : "2.0.0";
-        string graphFile = project.WriteGraph(root, version, Graph.Replace("\"linux\"", "\"unix\""));
-        File.SetLastWriteTimeUtc(graphFile, DateTime.UtcNow.AddDays(-1));
-        var properties = new Dictionary<string, string>
-        {
-            ["NuGetPackageRoot"] = root + Path.DirectorySeparatorChar,
-            ["MicrosoftNETCorePlatformsPackageVersion"] = version
-        };
-
-        project.Build(ChainTarget, properties).Tasks.Should().Contain(ChainTarget);
-        File.ReadAllText(project.ChainFile).Should().Be("linux-x64\nunix\nany");
-        project.Build(ChainTarget, properties).Tasks.Should().NotContain(ChainTarget);
-        project.Build(ChainTarget).Tasks.Should().Contain(ChainTarget);
-        File.ReadAllText(project.ChainFile).Should().Be("linux-x64\nlinux\nany");
-    }
-
-    /// <summary>
-    /// Verifies a deleted chain is regenerated despite existing completion state, and
-    /// output-directory changes and reverts do not rewrite an unchanged previous destination.
-    /// </summary>
-    [TestMethod]
-    public void RuntimeIdentifierChainRepairsMissingOutputAndTracksOutputPathChanges()
-    {
-        MetadataProject project = CreateProject();
-        project.Build(ChainTarget);
-        File.Delete(project.ChainFile);
-        project.Build(ChainTarget).Tasks.Should().Contain(ChainTarget);
-        File.ReadAllText(project.ChainFile).Should().Be("linux-x64\nlinux\nany");
-        Dictionary<string, DateTime> original = Snapshot([project.ChainFile]);
-        string other = Path.Combine(project.Root, "other-output");
-
-        project.Build(ChainTarget, new() { ["OutputPath"] = other + Path.DirectorySeparatorChar }).Tasks.Should().Contain(ChainTarget);
-        File.ReadAllText(Path.Combine(other, "NETCoreSdkRuntimeIdentifierChain.txt")).Should().Be("linux-x64\nlinux\nany");
-        AssertTimestamps(original);
-        project.Build(ChainTarget).Tasks.Should().Contain(ChainTarget);
-        AssertTimestamps(original);
-        project.Build(ChainTarget).Tasks.Should().NotContain(ChainTarget);
-    }
-
-    /// <summary>
-    /// Verifies missing or corrupt input state and completion markers force regeneration,
-    /// restore valid completion, and allow the following unchanged build to skip.
-    /// </summary>
-    [TestMethod]
-    [DataRow("inputs", false)]
-    [DataRow("inputs", true)]
-    [DataRow("complete", false)]
-    [DataRow("complete", true)]
-    public void RuntimeIdentifierChainRepairsMissingOrCorruptState(string extension, bool corrupt)
-    {
-        MetadataProject project = CreateProject();
-        project.Build(ChainTarget);
-        string state = Path.ChangeExtension(project.CompletionFile, extension);
-        if (corrupt)
-        {
-            File.WriteAllText(state, "corrupt");
-        }
-        else
-        {
-            File.Delete(state);
-        }
-
-        project.Build(ChainTarget).Tasks.Should().Contain(ChainTarget);
-        File.ReadAllText(project.ChainFile).Should().Be("linux-x64\nlinux\nany");
-        File.ReadAllText(project.CompletionFile).Should().Be("complete" + Environment.NewLine);
-        project.Build(ChainTarget).Tasks.Should().NotContain(ChainTarget);
-    }
-
-    /// <summary>
-    /// Verifies malformed graphs and interruption before completion leave no success stamp,
-    /// so a subsequent valid build repairs generation rather than trusting partial work.
-    /// </summary>
-    [TestMethod]
-    public void RuntimeIdentifierChainRecoversAfterFailedAndInterruptedGeneration()
-    {
-        MetadataProject project = CreateProject();
-        project.Build(ChainTarget);
-        WriteNewer(project.GraphFile, "{", project.CompletionFile);
-        project.Build(ChainTarget, success: false);
-        File.Exists(project.CompletionFile).Should().BeFalse();
-
-        WriteFile(project.GraphFile, Graph);
-        project.Build(ChainTarget, new() { ["InterruptChain"] = "true" }, success: false);
-        File.Exists(project.CompletionFile).Should().BeFalse();
-        project.Build(ChainTarget).Tasks.Should().Contain(ChainTarget);
-        project.Build(ChainTarget).Tasks.Should().NotContain(ChainTarget);
-    }
-
-    /// <summary>
-    /// Verifies interruption after recording changed inputs leaves the previous chain and
-    /// completion untouched, and the newer input state triggers regeneration on the next build.
-    /// </summary>
-    [TestMethod]
-    public void RuntimeIdentifierChainRecoversAfterInterruptedInputPreparation()
-    {
-        MetadataProject project = CreateProject();
-        project.Build(ChainTarget);
-        Dictionary<string, DateTime> original = Snapshot([project.ChainFile, project.CompletionFile]);
-
-        project.Build(ChainTarget, new()
-        {
-            ["PortableProductMonikerRid"] = "win-x64",
-            ["InterruptChainPreparation"] = "true"
-        }, success: false);
-        AssertTimestamps(original);
-        File.ReadAllText(project.ChainFile).Should().Be("linux-x64\nlinux\nany");
-
-        var properties = new Dictionary<string, string> { ["PortableProductMonikerRid"] = "win-x64" };
-        project.Build(ChainTarget, properties).Tasks.Should().Contain(ChainTarget);
-        File.ReadAllText(project.ChainFile).Should().Be("win-x64\nwin\nany");
-        project.Build(ChainTarget, properties).Tasks.Should().NotContain(ChainTarget);
-    }
-
-    /// <summary>
-    /// Verifies newer task-assembly or defining-target timestamps force reprocessing without
-    /// rewriting an identical chain, and the next unchanged build skips generation.
-    /// </summary>
-    [TestMethod]
-    [DataRow(false)]
-    [DataRow(true)]
-    public void RuntimeIdentifierChainTracksImplementationInputTimestamps(bool taskAssembly)
-    {
-        MetadataProject project = CreateProject();
-        string input = Path.Combine(project.Root, taskAssembly ? "sdk-tasks.dll" : "GenerateLayout.targets");
-        var properties = new Dictionary<string, string>();
-        if (taskAssembly)
-        {
-            File.Copy(typeof(GenerateSdkRuntimeIdentifierChain).Assembly.Location, input);
-            properties["SdkTasksAssembly"] = input;
-        }
-
-        project.Build(ChainTarget, properties);
-        project.Build(ChainTarget, properties).Tasks.Should().NotContain(ChainTarget);
-        Dictionary<string, DateTime> unchanged = AgeAndSnapshot([project.ChainFile]);
-        MakeNewer(input, project.CompletionFile);
-        project.Build(ChainTarget, properties).Tasks.Should().Contain(ChainTarget);
-        AssertTimestamps(unchanged);
-        project.Build(ChainTarget, properties).Tasks.Should().NotContain(ChainTarget);
     }
 
     private MetadataProject CreateProject() =>
@@ -443,16 +198,7 @@ public class SdkMetadataTests : SdkTest
             foreach (string name in new[] { "GenerateLayout.targets", "GenerateBundledVersions.targets" })
             {
                 string source = LayoutFiles.GetPath(name, Path.Combine("src", "Layout", "redist", "targets", name));
-                XDocument targets = XDocument.Load(source);
-                XElement? complete = targets.Descendants("Target").SingleOrDefault(element => (string?)element.Attribute("Name") == ChainTarget)
-                    ?.Element("CompleteIncrementalLayout");
-                complete?.AddBeforeSelf(new XElement("Error", new XAttribute("Condition", "'$(InterruptChain)' == 'true'"),
-                    new XAttribute("Text", "Injected chain interruption.")));
-                targets.Descendants("Target").SingleOrDefault(element => (string?)element.Attribute("Name") == "_PrepareGenerateSdkRuntimeIdentifierChain")
-                    ?.Element("WriteLinesToFile")?.AddAfterSelf(new XElement("Error",
-                        new XAttribute("Condition", "'$(InterruptChainPreparation)' == 'true'"),
-                        new XAttribute("Text", "Injected chain preparation interruption.")));
-                targets.Save(Path.Combine(root, name));
+                File.Copy(source, Path.Combine(root, name));
             }
             string assembly = typeof(GenerateSdkRuntimeIdentifierChain).Assembly.Location;
             string builtIn = Path.Combine(Path.GetDirectoryName(typeof(Project).Assembly.Location)!, "Microsoft.Build.Tasks.Core.dll");

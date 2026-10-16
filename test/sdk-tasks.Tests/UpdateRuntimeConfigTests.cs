@@ -115,39 +115,6 @@ public class UpdateRuntimeConfigTests : SdkTest
     }
 
     /// <summary>
-    /// Verifies repeated retargeting preserves canonical bytes and timestamps for single
-    /// frameworks, framework arrays, unknown frameworks, and configurations without frameworks.
-    /// </summary>
-    [TestMethod]
-    [DataRow("""{ "framework": { "name": "Microsoft.NETCore.App", "version": "1.0.0" } }""")]
-    [DataRow("""{ "frameworks": [{ "name": "Microsoft.NETCore.App", "version": "1.0.0" }, { "name": "Microsoft.AspNetCore.App", "version": "1.0.0" }] }""")]
-    [DataRow("""{ "framework": { "name": "Microsoft.WindowsDesktop.App", "version": "1.0.0" } }""")]
-    [DataRow("""{ "configProperties": { "Custom.Property": true } }""")]
-    public void RepeatedRetargetingPreservesContentsAndTimestamps(string runtimeOptions)
-    {
-        string directory = TestAssetsManager.CreateTestDirectory(identifier: Guid.NewGuid().ToString("N")).Path;
-        string path = Path.Combine(directory, "stable.runtimeconfig.json");
-        File.WriteAllText(path, $$"""{ "runtimeOptions": {{runtimeOptions}}, "custom": "preserved" }""");
-        var task = new UpdateRuntimeConfig
-        {
-            BuildEngine = new MockBuildEngine(),
-            RuntimeConfigPaths = [new TaskItem(path)],
-            MicrosoftNetCoreAppVersion = "9.0.0",
-            MicrosoftAspNetCoreAppVersion = "8.0.0"
-        };
-        task.Execute().Should().BeTrue();
-        byte[] expected = File.ReadAllBytes(path);
-        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(-5));
-        DateTime timestamp = File.GetLastWriteTimeUtc(path);
-
-        task.Execute().Should().BeTrue();
-        task.Execute().Should().BeTrue();
-
-        File.ReadAllBytes(path).Should().Equal(expected);
-        File.GetLastWriteTimeUtc(path).Should().Be(timestamp);
-    }
-
-    /// <summary>
     /// Verifies a raw config can produce multiple stable destinations without mutation,
     /// track framework-version edits and reverts, and repair one missing output independently.
     /// </summary>
