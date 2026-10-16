@@ -4,9 +4,7 @@
 using System.Security;
 using System.Text.Json.Nodes;
 using Microsoft.Build.Evaluation;
-using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
-using Microsoft.Build.Logging;
 using Microsoft.Build.Utilities;
 using Microsoft.DotNet.Build.Tasks;
 
@@ -316,17 +314,8 @@ public class SdkJsonLayoutTests : SdkTest
         public void Build(Dictionary<string, string>? properties = null, bool success = true)
         {
             using var collection = new ProjectCollection(properties ?? []);
-            ProjectInstance instance = collection.LoadProject(_project).CreateProjectInstance();
             var logger = new JsonLogger();
-            string binlog = Path.Combine(Root, $"build-{Guid.NewGuid():N}.binlog");
-            using var manager = new BuildManager();
-            BuildResult result = manager.Build(new BuildParameters(collection)
-                {
-                    Loggers = [logger, new BinaryLogger { Parameters = binlog }]
-                },
-                new BuildRequestData(instance, Targets.Split(';')));
-            (result.OverallResult == BuildResultCode.Success).Should().Be(success,
-                "MSBuild log:{0}{1}{0}Binlog: {2}", Environment.NewLine, logger.Text, binlog);
+            SdkLayoutBuild.Run(collection, _project, Root, Targets.Split(';'), logger, () => logger.Text, success);
         }
     }
 

@@ -5,9 +5,7 @@ using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
 using Microsoft.Build.Evaluation;
-using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
-using Microsoft.Build.Logging;
 using Microsoft.Build.Utilities;
 using Microsoft.DotNet.Build.Tasks;
 
@@ -296,17 +294,8 @@ public class SdkAppHostTests : SdkTest
             string targets = "PublishRoslyn;CreateMSBuildAppHost")
         {
             using var collection = new ProjectCollection(properties ?? []);
-            ProjectInstance instance = collection.LoadProject(_project).CreateProjectInstance();
             var logger = new AppHostLogger();
-            string binlog = Path.Combine(Root, $"build-{Guid.NewGuid():N}.binlog");
-            using var manager = new BuildManager();
-            BuildResult result = manager.Build(new BuildParameters(collection)
-                {
-                    Loggers = [logger, new BinaryLogger { Parameters = binlog }]
-                },
-                new BuildRequestData(instance, targets.Split(';')));
-            result.OverallResult.Should().Be(BuildResultCode.Success,
-                "MSBuild log:{0}{1}{0}Binlog: {2}", Environment.NewLine, logger.Text, binlog);
+            SdkLayoutBuild.Run(collection, _project, Root, targets.Split(';'), logger, () => logger.Text);
             return new Observation(logger.CreatedHosts);
         }
     }

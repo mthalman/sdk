@@ -3,9 +3,7 @@
 
 using System.Security;
 using Microsoft.Build.Evaluation;
-using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
-using Microsoft.Build.Logging;
 using Microsoft.Build.Utilities;
 
 namespace Microsoft.CoreSdkTasks.Tests;
@@ -243,17 +241,8 @@ public class SdkCopyLayoutTests : SdkTest
         public Observation Build(Dictionary<string, string>? properties = null, bool success = true)
         {
             using var collection = new ProjectCollection(properties ?? []);
-            ProjectInstance instance = collection.LoadProject(_project).CreateProjectInstance();
             var logger = new CopyLogger();
-            string binlog = Path.Combine(Root, $"build-{Guid.NewGuid():N}.binlog");
-            using var manager = new BuildManager();
-            BuildResult result = manager.Build(new BuildParameters(collection)
-                {
-                    Loggers = [logger, new BinaryLogger { Parameters = binlog }]
-                },
-                new BuildRequestData(instance, [_target]));
-            (result.OverallResult == BuildResultCode.Success).Should().Be(success,
-                "MSBuild log:{0}{1}{0}Binlog: {2}", Environment.NewLine, logger.Text, binlog);
+            SdkLayoutBuild.Run(collection, _project, Root, [_target], logger, () => logger.Text, success);
             return new Observation(logger.Copies, logger.Publishes, logger.Text);
         }
     }
