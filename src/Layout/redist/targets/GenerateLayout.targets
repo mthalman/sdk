@@ -180,10 +180,10 @@
     </PropertyGroup>
 
     <!-- Save the effective file list as well as comparing its timestamps: a remap
-         to an older package/assembly must invalidate previous completion. Only the
-         destination and non-file signing option need extra state. RID, extension,
-         and app binary name are already represented by the paths; changes to the
-         signing command are covered by the defining targets file. -->
+         to an older package/assembly must invalidate previous completion. Also save
+         the selected package path, destination, and non-file signing option. RID,
+         extension, and app binary name are already represented by the paths; changes
+         to the signing command are covered by the defining targets file. -->
     <WriteLinesToFile File="%(_RoslynAppHost.InputsFile)"
                       Lines="%(_RoslynAppHost.GenerationInputs);Destination=%(_RoslynAppHost.DestinationPath);EnableMacOSCodeSign=$(_SdkAppHostEnableMacOSCodeSign);RoslynPackagePath=$(RoslynPackagePath)"
                       Overwrite="true"
