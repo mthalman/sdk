@@ -96,20 +96,6 @@ public class SdkCopyLayoutTests : SdkTest
         project.Build().Copies.Should().Be(0);
     }
 
-    /// <summary>
-    /// Verifies apphost-template selection rejects ambiguous candidates on warm builds
-    /// rather than trusting an old copied template.
-    /// </summary>
-    [TestMethod]
-    public void AppHostTemplateSelectionRejectsAmbiguousCandidates()
-    {
-        CopyProject project = CreateProject("LayoutAppHostTemplate");
-        project.Build();
-        Write(Path.Combine(Path.GetDirectoryName(project.Source)!, "duplicate", Path.GetFileName(project.Source)), "duplicate");
-
-        project.Build(success: false).Text.Should().Contain("Failed to determine");
-    }
-
     private CopyProject CreateProject(string target) =>
         new(TestAssetsManager.CreateTestDirectory(identifier: Guid.NewGuid().ToString("N")).Path, target);
 

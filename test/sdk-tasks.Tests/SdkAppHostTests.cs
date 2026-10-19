@@ -250,7 +250,6 @@ public class SdkAppHostTests : SdkTest
                   </PropertyGroup>
                   <ItemGroup>
                     <_RoslynAppHost Include="$(OutputPath)Roslyn/bincore/csc.dll;$(OutputPath)Roslyn/bincore/vbc.dll;$(OutputPath)Roslyn/bincore/VBCSCompiler.dll" />
-                    <_RoslynAppHost Include="$(OutputPath)Roslyn/bincore/$(AdditionalCompiler).dll" Condition="'$(AdditionalCompiler)' != ''" />
                     <_MSBuildAppHost Include="$(OutputPath)MSBuild.dll" />
                   </ItemGroup>
                   <Import Project="GenerateLayout.targets" />
@@ -265,16 +264,14 @@ public class SdkAppHostTests : SdkTest
         public string RoslynPackageDirectory => RoslynPackageDirectoryAt("1.0.0");
         public string RoslynPackageDirectoryAt(string version) =>
             Path.Combine(Root, "packages", "microsoft.net.compilers.toolset", version, "tasks", "netcore", "bincore");
-        public string Template => TemplateAt(Path.Combine(Root, "packages"), Rid, "1.0.0", Extension);
-        public string TemplateAt(string packages, string rid, string version, string extension) =>
-            Path.Combine(packages, "microsoft.netcore.app.host." + rid, version, "runtimes", rid, "native", "apphost" + extension);
-        public string[] Hosts => HostsAt(OutputDirectory, Extension);
-        public string[] HostsAt(string output, string extension) =>
+        public string Template => Path.Combine(Root, "packages", "microsoft.netcore.app.host." + Rid,
+            "1.0.0", "runtimes", Rid, "native", "apphost" + Extension);
+        public string[] Hosts =>
         [
-            Path.Combine(output, "Roslyn", "bincore", "csc" + extension),
-            Path.Combine(output, "Roslyn", "bincore", "vbc" + extension),
-            Path.Combine(output, "Roslyn", "bincore", "VBCSCompiler" + extension),
-            Path.Combine(output, "MSBuild" + extension)
+            Path.Combine(OutputDirectory, "Roslyn", "bincore", "csc" + Extension),
+            Path.Combine(OutputDirectory, "Roslyn", "bincore", "vbc" + Extension),
+            Path.Combine(OutputDirectory, "Roslyn", "bincore", "VBCSCompiler" + Extension),
+            Path.Combine(OutputDirectory, "MSBuild" + Extension)
         ];
         public static string Extension => OperatingSystem.IsWindows() ? ".exe" : "";
         public string Output(params string[] parts) => Path.Combine([OutputDirectory, .. parts]);

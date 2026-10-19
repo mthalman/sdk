@@ -3,7 +3,6 @@
 
 using System.Security;
 using System.Text;
-using System.Xml.Linq;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Utilities;
@@ -115,9 +114,6 @@ public class SdkMetadataTests : SdkTest
     private MetadataProject CreateProject() =>
         new(TestAssetsManager.CreateTestDirectory(identifier: Guid.NewGuid().ToString("N")).Path);
 
-    private static string ReadProperty(string file, string name) =>
-        XDocument.Load(file).Descendants(name).Single().Value;
-
     private static Dictionary<string, DateTime> Snapshot(IEnumerable<string> paths) =>
         paths.ToDictionary(path => path, File.GetLastWriteTimeUtc);
 
@@ -184,7 +180,7 @@ public class SdkMetadataTests : SdkTest
             Root = root;
             PackageRoot = Path.Combine(root, "packages");
             GraphFile = WriteGraph(PackageRoot, "1.0.0", Graph);
-            FrameworkListFile = WriteFile(Path.Combine(PackageRoot, "microsoft.netcore.app.ref", "11.0.0", "data", "FrameworkList.xml"),
+            WriteFile(Path.Combine(PackageRoot, "microsoft.netcore.app.ref", "11.0.0", "data", "FrameworkList.xml"),
                 """<FileList TargetFrameworkVersion="11.0" />""");
             WriteFile(Path.Combine(root, "minimumMSBuildVersion"), "17.14.0");
             WriteFile(Path.Combine(root, "eng", "Version.Details.xml"), """
@@ -252,7 +248,6 @@ public class SdkMetadataTests : SdkTest
         public string Root { get; }
         public string PackageRoot { get; }
         public string GraphFile { get; }
-        public string FrameworkListFile { get; }
         public string ChainFile => Output("NETCoreSdkRuntimeIdentifierChain.txt");
         public string CompletionFile => Path.Combine(Root, "obj", "incremental-layout", "sdk-runtime-identifier-chain.complete");
         public string[] StateFiles => [Path.ChangeExtension(CompletionFile, ".inputs"), CompletionFile];
